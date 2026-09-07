@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,8 +28,10 @@ class HandTracker:
         min_tracking_confidence: float = 0.5,
     ):
         self.model_path = Path(model_path)
-        if not self.model_path.exists():
+        if not self.model_path.is_file():
             raise FileNotFoundError(f"No se encontró el modelo: {self.model_path}")
+        if num_hands < 1:
+            raise ValueError("num_hands debe ser >= 1")
 
         base_options = BaseOptions(model_asset_path=str(self.model_path))
         options = vision.HandLandmarkerOptions(
@@ -42,6 +46,8 @@ class HandTracker:
         self._last_timestamp_ms = -1
 
     def detect(self, frame, timestamp_ms: int) -> list[Hand]:
+        if frame is None or frame.ndim != 3 or frame.shape[2] != 3:
+            raise ValueError("frame debe ser una imagen BGR con shape (H, W, 3)")
         if timestamp_ms <= self._last_timestamp_ms:
             timestamp_ms = self._last_timestamp_ms + 1
         self._last_timestamp_ms = timestamp_ms
@@ -54,7 +60,7 @@ class HandTracker:
         if not result.hand_landmarks:
             return []
 
-        hands = []
+        hands: list[Hand] = []
         for index, landmarks in enumerate(result.hand_landmarks):
             pixel_landmarks = [
                 (
@@ -69,14 +75,12 @@ class HandTracker:
 
             handedness = "Unknown"
             score = 0.0
-            if (
-                result.handedness
-                and index < len(result.handedness)
-                and result.handedness[index]
-            ):
-                category = result.handedness[index][0]
-                handedness = category.category_name
-                score = category.score
+            if result.handedness and index < len(result.handedness):
+                categories = result.handedness[index]
+                if categories:
+                    category = categories[0]
+                    handedness = category.category_name
+                    score = float(category.score or 0.0)
 
             hands.append(
                 Hand(
