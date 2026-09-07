@@ -8,7 +8,7 @@ from src.vision.hand_tracker import HandTracker
 from src.gestures.gesture_engine import GestureEngine
 from src.portal.portal_engine import PortalEngine
 from src.portal.portal_renderer import PortalRenderer
-from src.dimensions import ProceduralDimension
+from src.dimensions import MultiverseDimension
 
 
 CONNECTIONS = [
@@ -31,22 +31,50 @@ def draw_hand_rig(frame, hand):
     cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
 
+def fingertip_distance(hands):
+    if len(hands) < 2:
+        return None
+    first = hands[0].pixel_landmarks
+    second = hands[1].pixel_landmarks
+    if len(first) <= 8 or len(second) <= 8:
+        return None
+    return math.hypot(second[8][0] - first[8][0], second[8][1] - first[8][1])
+
+
+def palm_scale(hands):
+    if len(hands) < 2:
+        return None
+    scales = []
+    for hand in hands[:2]:
+        points = hand.pixel_landmarks
+        if len(points) > 9:
+            scale = math.hypot(points[9][0] - points[0][0], points[9][1] - points[0][1])
+            if scale > 1.0:
+                scales.append(scale)
+    if not scales:
+        return None
+    return sum(scales) / len(scales)
+
+
 def main():
     camera = Camera(CameraConfig(threaded=True))
     tracker = HandTracker("assets/models/hand_landmarker.task")
     gestures = GestureEngine()
-    portal = PortalEngine()
+    portal = PortalEngine(min_width=120, max_width=900, aspect_ratio=0.58, smoothing=0.24)
     renderer = PortalRenderer()
-    dimension = ProceduralDimension()
+    dimension = MultiverseDimension(work_scale=0.60)
     show_hand_rig = False
 
     portal_intensity = 0.0
-    has_portal_geometry = False
-    open_confirm_frames = 0
+    portal_open = False
+    frame_armed = False
     lost_since = None
-    OPEN_CONFIRM_FRAMES = 3
-    LOST_GRACE_SECONDS = 0.60
     last_time = time.monotonic()
+
+    TOUCH_RATIO = 0.85
+    OPEN_RATIO = 1.55
+    CLOSE_RATIO = 0.95
+    LOST_GRACE_SECONDS = 0.60
 
     try:
         while True:
@@ -63,46 +91,63 @@ def main():
                 for hand in hands:
                     draw_hand_rig(frame, hand)
 
-            target_active = gestures.two_hand_open
+            distance = fingertip_distance(hands)
+            scale = palm_scale(hands)
 
-            if target_active and len(hands) >= 2:
-                open_confirm_frames = min(open_confirm_frames + 1, OPEN_CONFIRM_FRAMES)
-                lost_since = None
-                if open_confirm_frames >= OPEN_CONFIRM_FRAMES:
-                    state = portal.update(hands, timestamp_ms)
-                    has_portal_geometry = state.active
-            else:
-                open_confirm_frames = 0
-                if has_portal_geometry:
-                    if lost_since is None:
-                        lost_since = now
-                    elif now - lost_since >= LOST_GRACE_SECONDS:
-                        has_portal_geometry = False
-                        portal.state.active = False
+            if distance is not None and scale is not None:
+                touch_distance = scale * TOUCH_RATIO
+                open_distance = scale * OPEN_RATIO
+                close_distance = scale * CLOSE_RATIO
+
+                if not portal_open:
+                    # First bring the two index fingertips together to arm the frame.
+                    if distance <= touch_distance:
+                        frame_armed = True
+                    elif frame_armed and distance >= open_distance:
+                        portal_open = True
+                        lost_since = None
+                        portal.update(hands, timestamp_ms)
                 else:
+                    # Bringing the fingertips together again closes the window.
+                    if distance <= close_distance:
+                        portal_open = False
+                        frame_armed = False
+                        lost_since = None
+                        portal.reset()
+                    else:
+                        portal.update(hands, timestamp_ms)
+                        lost_since = None
+            elif portal_open:
+                if lost_since is None:
+                    lost_since = now
+                elif now - lost_since >= LOST_GRACE_SECONDS:
+                    portal_open = False
+                    frame_armed = False
                     lost_since = None
+                    portal.reset()
+            else:
+                frame_armed = False
 
-            target_intensity = 1.0 if has_portal_geometry else 0.0
-            smoothing = 1.0 - math.exp(-delta_time * 10.0)
+            target_intensity = 1.0 if portal_open else 0.0
+            smoothing = 1.0 - math.exp(-delta_time * 12.0)
             portal_intensity += (target_intensity - portal_intensity) * smoothing
 
-            if has_portal_geometry and portal_intensity > 0.005:
+            if portal_open and portal_intensity > 0.005:
                 state = portal.state
                 frame_h, frame_w = frame.shape[:2]
-
                 view_x = ((state.center[0] / max(frame_w - 1, 1)) - 0.5) * 2.0
                 view_y = ((state.center[1] / max(frame_h - 1, 1)) - 0.5) * 2.0
                 view_x = float(max(-1.0, min(1.0, view_x)))
                 view_y = float(max(-1.0, min(1.0, view_y)))
-                view_angle = math.radians(float(state.angle))
 
                 portal_dimension = dimension.render(
+                    frame,
                     state.width,
                     state.height,
+                    state.center,
                     timestamp_ms,
                     view_x=view_x,
                     view_y=view_y,
-                    view_angle=view_angle,
                 )
                 frame = renderer.render(
                     frame,
@@ -110,39 +155,24 @@ def main():
                     state.center,
                     state.width,
                     state.height,
-                    state.angle,
+                    0.0,
                     timestamp_ms,
                     portal_intensity,
                 )
 
-            status = "PORTAL ACTIVE" if has_portal_geometry else "PORTAL STANDBY"
-            cv2.putText(
-                frame,
-                status,
-                (20, 35),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (255, 255, 255),
-                2,
-            )
-            cv2.putText(
-                frame,
-                "2 OPEN HANDS = OPEN PORTAL",
-                (20, 65),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (255, 255, 255),
-                1,
-            )
-            cv2.putText(
-                frame,
-                "H = HAND RIG | Q / ESC = EXIT",
-                (20, 92),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (255, 255, 255),
-                1,
-            )
+            if portal_open:
+                status = "MULTIVERSE WINDOW"
+                hint = "SEPARA LOS DEDOS = ABRIR | JUNTALOS = CERRAR"
+            elif frame_armed:
+                status = "FRAME ARMED"
+                hint = "SEPARA LOS DEDOS PARA ABRIR"
+            else:
+                status = "FRAME READY"
+                hint = "JUNTA LAS PUNTAS DE LOS INDICES"
+
+            cv2.putText(frame, status, (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+            cv2.putText(frame, hint, (20, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+            cv2.putText(frame, "H = HAND RIG | Q / ESC = EXIT", (20, 92), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
 
             cv2.imshow("RetroLens-X", frame)
             key = cv2.waitKey(1) & 0xFF
