@@ -108,17 +108,10 @@ class PortalRenderer:
         return frame
 
     def _glow_from_edges(self, edges):
-        scale = min(max(float(self.config.glow_scale), 0.25), 1.0)
-        if scale >= 0.999:
-            return cv2.GaussianBlur(edges, (0, 0), self.config.glow_sigma)
-
-        h, w = edges.shape[:2]
-        small_w = max(1, int(round(w * scale)))
-        small_h = max(1, int(round(h * scale)))
-        small = cv2.resize(edges, (small_w, small_h), interpolation=cv2.INTER_AREA)
-        small_sigma = max(0.5, self.config.glow_sigma * scale)
-        small_glow = cv2.GaussianBlur(small, (0, 0), small_sigma)
-        return cv2.resize(small_glow, (w, h), interpolation=cv2.INTER_LINEAR)
+        sigma = max(float(self.config.glow_sigma), 0.5)
+        distances = cv2.distanceTransform(255 - edges, cv2.DIST_L2, 3)
+        glow = np.exp(-(distances * distances) / (2.0 * sigma * sigma)) * 255.0
+        return np.clip(glow, 0.0, 255.0).astype(np.uint8)
 
     @staticmethod
     def _add_glow(image, glow):
