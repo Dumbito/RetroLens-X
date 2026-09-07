@@ -59,8 +59,12 @@ class PortalRenderer:
             cache[key] = buffer
         return buffer
 
-    def render(self, frame, dimension, center, width, height, angle, timestamp_ms):
+    def render(self, frame, dimension, center, width, height, angle, timestamp_ms, intensity=1.0):
         if width <= 0 or height <= 0 or frame.ndim != 3:
+            return frame
+
+        intensity = min(max(float(intensity), 0.0), 1.0)
+        if intensity <= 0.0:
             return frame
 
         frame_h, frame_w = frame.shape[:2]
@@ -97,6 +101,7 @@ class PortalRenderer:
 
         alpha = self._single_buffer(self._alpha_cache, mask.shape)
         cv2.normalize(mask, alpha, 1.0 / 255.0, 0.0, cv2.NORM_MINMAX, dtype=cv2.CV_32F)
+        alpha *= intensity
         local_output = self._buffer(self._canvas_cache, local_frame.shape)
         np.multiply(local_frame, 1.0 - alpha[..., None], out=local_output, casting="unsafe")
         np.add(local_output, content * alpha[..., None], out=local_output, casting="unsafe")
@@ -104,12 +109,16 @@ class PortalRenderer:
 
         edges = cv2.Canny(mask, 70, 180)
         glow = self._glow_from_edges(edges)
+        if intensity < 0.999:
+            glow = np.multiply(glow, intensity).astype(np.uint8)
         self._add_glow(local_output, glow)
 
         energy = self._buffer(self._ring_cache, local_output.shape)
         energy.fill(0)
         self._draw_rings(energy, local_center, width, height, angle_rad, t)
         self._draw_particles(energy, local_center, width, height, angle_rad, t)
+        if intensity < 0.999:
+            energy[:] = np.multiply(energy, intensity).astype(np.uint8)
 
         blend = self._buffer(self._blend_cache, local_output.shape)
         cv2.addWeighted(local_output, 1.0, energy, 0.82, 0.0, dst=blend)
@@ -118,6 +127,8 @@ class PortalRenderer:
         rim = self._buffer(self._rim_cache, local_output.shape)
         rim.fill(0)
         self._draw_rim(rim, local_center, width, height, angle_rad, t)
+        if intensity < 0.999:
+            rim[:] = np.multiply(rim, intensity).astype(np.uint8)
         cv2.addWeighted(local_output, 1.0, rim, 0.95, 0.0, dst=blend)
         local_output = blend
 
