@@ -18,6 +18,12 @@ Thumbs.db
 *.task
 assets/models/
 
+# Local media assets (large / user-provided)
+assets/media/*.mp4
+assets/media/*.webm
+assets/media/*.mov
+assets/media/*.mkv
+
 # Local backups / experimental copies
 *.backup
 *.bak
