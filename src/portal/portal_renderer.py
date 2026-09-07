@@ -90,7 +90,8 @@ class PortalRenderer:
     @staticmethod
     def _add_glow(image, glow):
         for channel, weight in enumerate((0.55, 0.41, 0.19)):
-            cv2.addWeighted(image[:, :, channel], 1.0, glow, weight, 0.0, dst=image[:, :, channel])
+            blended = cv2.addWeighted(image[:, :, channel], 1.0, glow, weight, 0.0)
+            image[:, :, channel] = blended
 
     @staticmethod
     def _prepare_content(dimension, width, height, local_w, local_h):
