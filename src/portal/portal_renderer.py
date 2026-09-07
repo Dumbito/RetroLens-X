@@ -38,7 +38,7 @@ class PortalRenderer:
             return frame
 
         frame_h, frame_w = frame.shape[:2]
-        cx, cy = map(int, center)
+        cx, cy = int(round(center[0])), int(round(center[1]))
         angle_rad = math.radians(float(angle))
         rx = max(float(width) * 0.5, 1.0)
         ry = max(float(height) * 0.5, 1.0)
@@ -73,11 +73,14 @@ class PortalRenderer:
             t,
         )
 
+        # Build the dimension directly in the same local coordinate system as
+        # the mask. This avoids double-centering/cropping when the portal rotates.
         content = self._prepare_content(
             dimension,
             width,
             height,
             angle_rad,
+            local_center,
             local_w,
             local_h,
         )
@@ -96,11 +99,11 @@ class PortalRenderer:
         energy = np.zeros_like(local_output)
         self._draw_rings(energy, local_center, width, height, angle_rad, t)
         self._draw_particles(energy, local_center, width, height, angle_rad, t)
-        local_output = cv2.addWeighted(local_output, 1.0, energy, 0.82, 0.0)
+        cv2.addWeighted(local_output, 1.0, energy, 0.82, 0.0, dst=local_output)
 
         rim = np.zeros_like(local_output)
         self._draw_rim(rim, local_center, width, height, angle_rad, t)
-        local_output = cv2.addWeighted(local_output, 1.0, rim, 0.95, 0.0)
+        cv2.addWeighted(local_output, 1.0, rim, 0.95, 0.0, dst=local_output)
 
         frame[y0:y1, x0:x1] = local_output
         return frame
@@ -112,7 +115,7 @@ class PortalRenderer:
             image[:, :, channel] = blended
 
     @staticmethod
-    def _prepare_content(dimension, width, height, angle, local_w, local_h):
+    def _prepare_content(dimension, width, height, angle, center, local_w, local_h):
         target_w = max(1, int(round(width)))
         target_h = max(1, int(round(height)))
         if dimension.shape[1] == target_w and dimension.shape[0] == target_h:
@@ -120,7 +123,8 @@ class PortalRenderer:
         else:
             resized = cv2.resize(dimension, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
 
-        # Build a bounding canvas large enough to contain the rotated dimension.
+        # Rotation uses a full bounding canvas, then the result is placed around
+        # the exact same center used by the portal mask/rings/rim.
         sin_a = abs(math.sin(angle))
         cos_a = abs(math.cos(angle))
         rotated_w = max(1, int(math.ceil(target_w * cos_a + target_h * sin_a)))
@@ -130,16 +134,12 @@ class PortalRenderer:
             rotated = resized
         else:
             source_center = ((target_w - 1) * 0.5, (target_h - 1) * 0.5)
-            rotation_matrix = cv2.getRotationMatrix2D(
-                source_center,
-                -math.degrees(angle),
-                1.0,
-            )
-            rotation_matrix[0, 2] += (rotated_w - target_w) * 0.5
-            rotation_matrix[1, 2] += (rotated_h - target_h) * 0.5
+            matrix = cv2.getRotationMatrix2D(source_center, -math.degrees(angle), 1.0)
+            matrix[0, 2] += (rotated_w - target_w) * 0.5
+            matrix[1, 2] += (rotated_h - target_h) * 0.5
             rotated = cv2.warpAffine(
                 resized,
-                rotation_matrix,
+                matrix,
                 (rotated_w, rotated_h),
                 flags=cv2.INTER_LINEAR,
                 borderMode=cv2.BORDER_CONSTANT,
@@ -147,8 +147,9 @@ class PortalRenderer:
             )
 
         canvas = np.zeros((local_h, local_w, 3), dtype=np.uint8)
-        x = int(round(local_w * 0.5 - rotated.shape[1] * 0.5))
-        y = int(round(local_h * 0.5 - rotated.shape[0] * 0.5))
+        cx, cy = center
+        x = int(round(cx - rotated.shape[1] * 0.5))
+        y = int(round(cy - rotated.shape[0] * 0.5))
         src_x0 = max(0, -x)
         src_y0 = max(0, -y)
         dst_x0 = max(0, x)
@@ -182,12 +183,7 @@ class PortalRenderer:
         rx = max(width * 0.5, 1.0)
         ry = max(height * 0.5, 1.0)
         theta = np.arctan2(yr, xr)
-        wave = (
-            1.0
-            + 0.075 * np.sin(theta * 5.0 + t * 3.2)
-            + 0.045 * np.sin(theta * 9.0 - t * 2.1)
-            + 0.025 * np.sin(theta * 14.0 + t * 4.7)
-        )
+        wave = 1.0 + 0.075 * np.sin(theta * 5.0 + t * 3.2) + 0.045 * np.sin(theta * 9.0 - t * 2.1) + 0.025 * np.sin(theta * 14.0 + t * 4.7)
         radius = np.sqrt((xr / rx) ** 2 + (yr / ry) ** 2)
         boundary = radius / wave
         alpha = np.clip((1.0 - boundary) / 0.035 + 0.5, 0.0, 1.0)
@@ -215,9 +211,8 @@ class PortalRenderer:
             cv2.polylines(layer, [pts], True, (90, 170, 245), 2 if i == 1 else 1, cv2.LINE_AA)
             if self.config.ring_blur_sigma > 0:
                 blur = cv2.GaussianBlur(layer, (0, 0), self.config.ring_blur_sigma)
-                image = cv2.addWeighted(image, 1.0, blur, 0.45, 0.0)
-            image = cv2.addWeighted(image, 1.0, layer, 0.75, 0.0)
-        return image
+                cv2.addWeighted(image, 1.0, blur, 0.45, 0.0, dst=image)
+            cv2.addWeighted(image, 1.0, layer, 0.75, 0.0, dst=image)
 
     def _draw_rim(self, image, center, width, height, angle, t):
         pts = self._ellipse_points(center, width, height, angle, t, 0.0, 1.0, 220)
