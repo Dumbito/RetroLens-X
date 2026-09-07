@@ -5,12 +5,7 @@ from dataclasses import dataclass
 
 @dataclass(slots=True)
 class PortalStateMachine:
-    """Gesture-driven lifecycle for the aperture.
-
-    Thresholds are normalized by hand scale, so the same gesture works at
-    different distances from the camera. A short hold prevents accidental
-    arming and a grace period avoids closing during transient tracking loss.
-    """
+    """Gesture-driven lifecycle for the aperture."""
 
     arm_ratio: float = 0.72
     open_ratio: float = 1.05
@@ -21,7 +16,7 @@ class PortalStateMachine:
     armed_since: float | None = None
     lost_since: float | None = None
 
-    def update(self, distance, scale, now, portal, physics, timestamp_ms):
+    def update(self, hands, distance, scale, now, portal, physics, timestamp_ms):
         if distance is not None and scale is not None:
             arm_distance = scale * self.arm_ratio
             open_distance = scale * self.open_ratio
@@ -42,7 +37,7 @@ class PortalStateMachine:
                     self.phase = "OPEN"
                     self.lost_since = None
                     portal.reset()
-                    portal.update(portal._last_hands if hasattr(portal, "_last_hands") else (), timestamp_ms)
+                    portal.update(hands, timestamp_ms)
                     physics.reset()
                     physics.trigger_open(portal.state.center)
                 elif distance > arm_distance * 1.65:
