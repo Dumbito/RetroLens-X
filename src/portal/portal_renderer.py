@@ -44,7 +44,10 @@ class PortalRenderer:
         ry = max(height * 0.5, 1.0)
         ca = abs(math.cos(angle_rad))
         sa = abs(math.sin(angle_rad))
-        margin = max(self.config.roi_margin, int(math.ceil(self.config.glow_sigma * 3.0 + self.config.edge_thickness + 4)))
+        margin = max(
+            self.config.roi_margin,
+            int(math.ceil(self.config.glow_sigma * 3.0 + self.config.edge_thickness + 4)),
+        )
 
         half_w = int(math.ceil(rx * ca + ry * sa)) + margin
         half_h = int(math.ceil(rx * sa + ry * ca)) + margin
@@ -61,8 +64,25 @@ class PortalRenderer:
         t = timestamp_ms * 0.001
         local_frame = frame[y0:y1, x0:x1]
 
-        mask = self._organic_mask((local_h, local_w), local_center, width, height, angle_rad, t)
-        content = self._prepare_content(dimension, width, height, local_w, local_h)
+        # The mask is generated in the rotated local ROI. This keeps the expensive
+        # per-pixel work bounded while still supporting arbitrary portal angles.
+        mask = self._organic_mask(
+            (local_h, local_w),
+            local_center,
+            width,
+            height,
+            angle_rad,
+            t,
+        )
+
+        content = self._prepare_content(
+            dimension,
+            width,
+            height,
+            angle_rad,
+            local_w,
+            local_h,
+        )
 
         alpha = mask.astype(np.float32) * (1.0 / 255.0)
         alpha_3 = alpha[..., None]
@@ -94,7 +114,7 @@ class PortalRenderer:
             image[:, :, channel] = blended
 
     @staticmethod
-    def _prepare_content(dimension, width, height, local_w, local_h):
+    def _prepare_content(dimension, width, height, angle, local_w, local_h):
         target_w = max(1, int(width))
         target_h = max(1, int(height))
         if dimension.shape[1] == target_w and dimension.shape[0] == target_h:
@@ -102,13 +122,40 @@ class PortalRenderer:
         else:
             resized = cv2.resize(dimension, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
 
+        if abs(math.sin(angle)) < 1e-6:
+            canvas = np.zeros((local_h, local_w, 3), dtype=np.uint8)
+            x = max(0, (local_w - target_w) // 2)
+            y = max(0, (local_h - target_h) // 2)
+            x2 = min(local_w, x + target_w)
+            y2 = min(local_h, y + target_h)
+            if x2 > x and y2 > y:
+                canvas[y:y2, x:x2] = resized[: y2 - y, : x2 - x]
+            return canvas
+
+        # The content itself is rotated along with the portal. Using the exact
+        # same inverse rotation as the mask keeps the dimension centered for
+        # 90-degree and arbitrary-angle portals.
+        rotation_matrix = cv2.getRotationMatrix2D(
+            ((target_w - 1) * 0.5, (target_h - 1) * 0.5),
+            -math.degrees(angle),
+            1.0,
+        )
+        rotated = cv2.warpAffine(
+            resized,
+            rotation_matrix,
+            (target_w, target_h),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=(0, 0, 0),
+        )
+
         canvas = np.zeros((local_h, local_w, 3), dtype=np.uint8)
-        x = max(0, (local_w - target_w) // 2)
-        y = max(0, (local_h - target_h) // 2)
-        x2 = min(local_w, x + target_w)
-        y2 = min(local_h, y + target_h)
+        x = max(0, (local_w - rotated.shape[1]) // 2)
+        y = max(0, (local_h - rotated.shape[0]) // 2)
+        x2 = min(local_w, x + rotated.shape[1])
+        y2 = min(local_h, y + rotated.shape[0])
         if x2 > x and y2 > y:
-            canvas[y:y2, x:x2] = resized[: y2 - y, : x2 - x]
+            canvas[y:y2, x:x2] = rotated[: y2 - y, : x2 - x]
         return canvas
 
     def _organic_mask(self, shape, center, width, height, angle, t):
