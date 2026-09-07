@@ -1,15 +1,26 @@
-.venv/
+# Python
 __pycache__/
 *.py[cod]
-.pytest_cache/
-.idea/
-*.egg-info/
-.DS_Store
-assets/models/*.task
+*.pyo
+.venv/
+venv/
+env/
 
-# Backups locales
-*.bak
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local model binaries / large assets
+*.task
+assets/models/
+
+# Local backups / experimental copies
 *.backup
+*.bak
 *.preopt-backup
 *.preopt2-backup
 *.v050-backup
@@ -17,13 +28,7 @@ assets/models/*.task
 *.v052-backup
 *.v053-backup
 
-# Python
-__pycache__/
-*.py[cod]
-
-# Entornos locales
-.venv/
-venv/
-
-# Modelos descargados
-assets/models/*.task
+# Runtime output
+*.log
+*.tmp
+screenshots/
