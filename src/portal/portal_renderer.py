@@ -40,19 +40,10 @@ class PortalRenderer:
         self._ring_cache: dict[tuple[int, int], np.ndarray] = {}
         self._rim_cache: dict[tuple[int, int], np.ndarray] = {}
         self._glow_cache: dict[tuple[int, int], np.ndarray] = {}
-        self._alpha_cache: dict[tuple[int, int], np.ndarray] = {}
         self._alpha_float_cache: dict[tuple[int, int], np.ndarray] = {}
         self._blend_cache: dict[tuple[int, int], np.ndarray] = {}
 
     def _buffer(self, cache: dict[tuple[int, int], np.ndarray], shape: tuple[int, int, int]) -> np.ndarray:
-        key = (shape[1], shape[0])
-        buffer = cache.get(key)
-        if buffer is None or buffer.shape != shape:
-            buffer = np.empty(shape, dtype=np.uint8)
-            cache[key] = buffer
-        return buffer
-
-    def _single_buffer(self, cache: dict[tuple[int, int], np.ndarray], shape: tuple[int, int]) -> np.ndarray:
         key = (shape[1], shape[0])
         buffer = cache.get(key)
         if buffer is None or buffer.shape != shape:
@@ -108,12 +99,11 @@ class PortalRenderer:
             dimension, width, height, angle_rad, local_center, local_w, local_h
         )
 
-        alpha_u8 = self._single_buffer(self._alpha_cache, mask.shape)
-        cv2.normalize(mask, alpha_u8, 1.0 / 255.0, 0.0, cv2.NORM_MINMAX, dtype=cv2.CV_32F)
+        # Keep alpha in float32 from the normalization step onward. The previous
+        # uint8 destination caused invalid quantization and the TV-static artifact.
         alpha = self._float_buffer(self._alpha_float_cache, mask.shape)
-        alpha[:] = alpha_u8.astype(np.float32)
-        if intensity < 0.999:
-            alpha *= intensity
+        cv2.normalize(mask, alpha, 1.0, 0.0, cv2.NORM_MINMAX, dtype=cv2.CV_32F)
+        alpha *= intensity
 
         local_output = self._buffer(self._canvas_cache, local_frame.shape)
         np.multiply(local_frame, 1.0 - alpha[..., None], out=local_output, casting="unsafe")
