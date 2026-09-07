@@ -1,3 +1,4 @@
+import math
 import time
 
 import cv2
@@ -38,10 +39,16 @@ def main():
     renderer = PortalRenderer()
     dimension = ProceduralDimension()
     show_hand_rig = False
+    portal_intensity = 0.0
+    has_portal_geometry = False
+    last_time = time.monotonic()
 
     try:
         while True:
             frame = camera.read()
+            now = time.monotonic()
+            delta_time = min(max(now - last_time, 0.0), 0.1)
+            last_time = now
             timestamp_ms = time.monotonic_ns() // 1_000_000
 
             hands = tracker.detect(frame, timestamp_ms)
@@ -51,12 +58,18 @@ def main():
                 for hand in hands:
                     draw_hand_rig(frame, hand)
 
-            if gestures.two_hand_open:
-                portal.update(hands, timestamp_ms)
-            else:
+            target_active = gestures.two_hand_open
+            if target_active:
+                state = portal.update(hands, timestamp_ms)
+                has_portal_geometry = state.active
+            elif portal.state.active:
                 portal.state.active = False
 
-            if portal.state.active:
+            target_intensity = 1.0 if target_active and has_portal_geometry else 0.0
+            smoothing = 1.0 - math.exp(-delta_time * 10.0)
+            portal_intensity += (target_intensity - portal_intensity) * smoothing
+
+            if has_portal_geometry and portal_intensity > 0.005:
                 state = portal.state
                 portal_dimension = dimension.render(
                     state.width,
@@ -71,9 +84,10 @@ def main():
                     state.height,
                     state.angle,
                     timestamp_ms,
+                    portal_intensity,
                 )
 
-            status = "PORTAL ACTIVE" if portal.state.active else "PORTAL STANDBY"
+            status = "PORTAL ACTIVE" if target_active and has_portal_geometry else "PORTAL STANDBY"
             cv2.putText(
                 frame,
                 status,
