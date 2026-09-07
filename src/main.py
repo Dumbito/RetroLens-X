@@ -39,8 +39,13 @@ def main():
     renderer = PortalRenderer()
     dimension = ProceduralDimension()
     show_hand_rig = False
+
     portal_intensity = 0.0
     has_portal_geometry = False
+    open_confirm_frames = 0
+    lost_frames = 0
+    OPEN_CONFIRM_FRAMES = 3
+    LOST_GRACE_FRAMES = 7
     last_time = time.monotonic()
 
     try:
@@ -59,13 +64,24 @@ def main():
                     draw_hand_rig(frame, hand)
 
             target_active = gestures.two_hand_open
-            if target_active:
-                state = portal.update(hands, timestamp_ms)
-                has_portal_geometry = state.active
-            elif portal.state.active:
-                portal.state.active = False
 
-            target_intensity = 1.0 if target_active and has_portal_geometry else 0.0
+            if target_active:
+                open_confirm_frames = min(open_confirm_frames + 1, OPEN_CONFIRM_FRAMES)
+                lost_frames = 0
+                if open_confirm_frames >= OPEN_CONFIRM_FRAMES:
+                    state = portal.update(hands, timestamp_ms)
+                    has_portal_geometry = state.active
+            else:
+                open_confirm_frames = 0
+                if has_portal_geometry:
+                    lost_frames += 1
+                    if lost_frames > LOST_GRACE_FRAMES:
+                        has_portal_geometry = False
+                        portal.state.active = False
+                else:
+                    lost_frames = 0
+
+            target_intensity = 1.0 if has_portal_geometry else 0.0
             smoothing = 1.0 - math.exp(-delta_time * 10.0)
             portal_intensity += (target_intensity - portal_intensity) * smoothing
 
@@ -73,8 +89,6 @@ def main():
                 state = portal.state
                 frame_h, frame_w = frame.shape[:2]
 
-                # Use the portal's position and rotation as a subtle camera/parallax cue.
-                # The dimension moves independently from the portal itself, creating depth.
                 view_x = ((state.center[0] / max(frame_w - 1, 1)) - 0.5) * 2.0
                 view_y = ((state.center[1] / max(frame_h - 1, 1)) - 0.5) * 2.0
                 view_x = float(max(-1.0, min(1.0, view_x)))
@@ -100,7 +114,7 @@ def main():
                     portal_intensity,
                 )
 
-            status = "PORTAL ACTIVE" if target_active and has_portal_geometry else "PORTAL STANDBY"
+            status = "PORTAL ACTIVE" if has_portal_geometry else "PORTAL STANDBY"
             cv2.putText(
                 frame,
                 status,
