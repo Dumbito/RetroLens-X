@@ -41,19 +41,15 @@ def fingertip_distance(hands):
     return math.hypot(second[8][0] - first[8][0], second[8][1] - first[8][1])
 
 
-def palm_scale(hands):
-    if len(hands) < 2:
-        return None
-    scales = []
+def hand_scale(hands):
+    values = []
     for hand in hands[:2]:
         points = hand.pixel_landmarks
         if len(points) > 9:
-            scale = math.hypot(points[9][0] - points[0][0], points[9][1] - points[0][1])
-            if scale > 1.0:
-                scales.append(scale)
-    if not scales:
-        return None
-    return sum(scales) / len(scales)
+            value = math.hypot(points[9][0] - points[0][0], points[9][1] - points[0][1])
+            if value > 1.0:
+                values.append(value)
+    return sum(values) / len(values) if values else None
 
 
 def main():
@@ -66,14 +62,16 @@ def main():
     show_hand_rig = False
 
     portal_intensity = 0.0
-    portal_open = False
-    frame_armed = False
+    phase = "READY"
     lost_since = None
     last_time = time.monotonic()
 
-    TOUCH_RATIO = 0.85
-    OPEN_RATIO = 1.55
-    CLOSE_RATIO = 0.95
+    # The gesture is deliberately simple: touch the two index fingertips,
+    # then separate them. The thresholds are relative to hand size so they
+    # work at different distances from the webcam.
+    ARM_RATIO = 0.55
+    OPEN_RATIO = 1.10
+    CLOSE_RATIO = 0.62
     LOST_GRACE_SECONDS = 0.60
 
     try:
@@ -92,47 +90,49 @@ def main():
                     draw_hand_rig(frame, hand)
 
             distance = fingertip_distance(hands)
-            scale = palm_scale(hands)
+            scale = hand_scale(hands)
 
             if distance is not None and scale is not None:
-                touch_distance = scale * TOUCH_RATIO
+                arm_distance = scale * ARM_RATIO
                 open_distance = scale * OPEN_RATIO
                 close_distance = scale * CLOSE_RATIO
 
-                if not portal_open:
-                    # First bring the two index fingertips together to arm the frame.
-                    if distance <= touch_distance:
-                        frame_armed = True
-                    elif frame_armed and distance >= open_distance:
-                        portal_open = True
+                if phase == "READY":
+                    if distance <= arm_distance:
+                        phase = "ARMED"
                         lost_since = None
+                elif phase == "ARMED":
+                    if distance >= open_distance:
+                        phase = "OPEN"
+                        lost_since = None
+                        portal.reset()
                         portal.update(hands, timestamp_ms)
-                else:
-                    # Bringing the fingertips together again closes the window.
+                    elif distance > arm_distance * 1.35:
+                        # If the user backs out without opening, return to READY.
+                        phase = "READY"
+                elif phase == "OPEN":
                     if distance <= close_distance:
-                        portal_open = False
-                        frame_armed = False
+                        phase = "READY"
                         lost_since = None
                         portal.reset()
                     else:
                         portal.update(hands, timestamp_ms)
                         lost_since = None
-            elif portal_open:
+            elif phase == "OPEN":
                 if lost_since is None:
                     lost_since = now
                 elif now - lost_since >= LOST_GRACE_SECONDS:
-                    portal_open = False
-                    frame_armed = False
+                    phase = "READY"
                     lost_since = None
                     portal.reset()
             else:
-                frame_armed = False
+                phase = "READY"
 
-            target_intensity = 1.0 if portal_open else 0.0
+            target_intensity = 1.0 if phase == "OPEN" else 0.0
             smoothing = 1.0 - math.exp(-delta_time * 12.0)
             portal_intensity += (target_intensity - portal_intensity) * smoothing
 
-            if portal_open and portal_intensity > 0.005:
+            if phase == "OPEN" and portal_intensity > 0.005:
                 state = portal.state
                 frame_h, frame_w = frame.shape[:2]
                 view_x = ((state.center[0] / max(frame_w - 1, 1)) - 0.5) * 2.0
@@ -160,19 +160,21 @@ def main():
                     portal_intensity,
                 )
 
-            if portal_open:
+            if phase == "OPEN":
                 status = "MULTIVERSE WINDOW"
-                hint = "SEPARA LOS DEDOS = ABRIR | JUNTALOS = CERRAR"
-            elif frame_armed:
+                hint = "JUNTA LOS INDICES PARA CERRAR"
+            elif phase == "ARMED":
                 status = "FRAME ARMED"
-                hint = "SEPARA LOS DEDOS PARA ABRIR"
+                hint = "AHORA SEPARA LOS INDICES"
             else:
                 status = "FRAME READY"
                 hint = "JUNTA LAS PUNTAS DE LOS INDICES"
 
             cv2.putText(frame, status, (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
             cv2.putText(frame, hint, (20, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-            cv2.putText(frame, "H = HAND RIG | Q / ESC = EXIT", (20, 92), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+            if distance is not None and scale is not None:
+                cv2.putText(frame, f"INDEX DIST: {distance:.0f} / HAND SCALE: {scale:.0f}", (20, 92), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            cv2.putText(frame, "H = HAND RIG | Q / ESC = EXIT", (20, 118), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
 
             cv2.imshow("RetroLens-X", frame)
             key = cv2.waitKey(1) & 0xFF
