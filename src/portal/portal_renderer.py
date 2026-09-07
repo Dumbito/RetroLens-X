@@ -40,6 +40,7 @@ class PortalRenderer:
         self._rim_cache: dict[tuple[int, int], np.ndarray] = {}
         self._glow_cache: dict[tuple[int, int], np.ndarray] = {}
         self._alpha_cache: dict[tuple[int, int], np.ndarray] = {}
+        self._blend_cache: dict[tuple[int, int], np.ndarray] = {}
 
     def _buffer(self, cache: dict[tuple[int, int], np.ndarray], shape: tuple[int, int, int]) -> np.ndarray:
         key = (shape[1], shape[0])
@@ -98,7 +99,7 @@ class PortalRenderer:
         local_output = self._buffer(self._canvas_cache, local_frame.shape)
         np.multiply(local_frame, 1.0 - alpha[..., None], out=local_output, casting="unsafe")
         np.add(local_output, content * alpha[..., None], out=local_output, casting="unsafe")
-        local_output = np.clip(local_output, 0, 255).astype(np.uint8)
+        np.clip(local_output, 0, 255, out=local_output)
 
         edges = cv2.Canny(mask, 70, 180)
         glow = self._glow_from_edges(edges)
@@ -108,12 +109,16 @@ class PortalRenderer:
         energy.fill(0)
         self._draw_rings(energy, local_center, width, height, angle_rad, t)
         self._draw_particles(energy, local_center, width, height, angle_rad, t)
-        local_output = cv2.addWeighted(local_output, 1.0, energy, 0.82, 0.0)
+
+        blend = self._buffer(self._blend_cache, local_output.shape)
+        cv2.addWeighted(local_output, 1.0, energy, 0.82, 0.0, dst=blend)
+        local_output, blend = blend, local_output
 
         rim = self._buffer(self._rim_cache, local_output.shape)
         rim.fill(0)
         self._draw_rim(rim, local_center, width, height, angle_rad, t)
-        local_output = cv2.addWeighted(local_output, 1.0, rim, 0.95, 0.0)
+        cv2.addWeighted(local_output, 1.0, rim, 0.95, 0.0, dst=blend)
+        local_output = blend
 
         frame[y0:y1, x0:x1] = local_output
         return frame
