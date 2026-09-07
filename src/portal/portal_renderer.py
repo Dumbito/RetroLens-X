@@ -37,6 +37,7 @@ class PortalRenderer:
         self._canvas_cache: dict[tuple[int, int], np.ndarray] = {}
         self._energy_cache: dict[tuple[int, int], np.ndarray] = {}
         self._rim_cache: dict[tuple[int, int], np.ndarray] = {}
+        self._ring_cache: dict[tuple[int, int], np.ndarray] = {}
 
     def _buffer(self, cache: dict[tuple[int, int], np.ndarray], shape: tuple[int, int, int]) -> np.ndarray:
         key = (shape[1], shape[0])
@@ -77,23 +78,9 @@ class PortalRenderer:
         t = float(timestamp_ms) * 0.001
         local_frame = frame[y0:y1, x0:x1]
 
-        mask = self._organic_mask(
-            (local_h, local_w),
-            local_center,
-            width,
-            height,
-            angle_rad,
-            t,
-        )
-
+        mask = self._organic_mask((local_h, local_w), local_center, width, height, angle_rad, t)
         content = self._prepare_content(
-            dimension,
-            width,
-            height,
-            angle_rad,
-            local_center,
-            local_w,
-            local_h,
+            dimension, width, height, angle_rad, local_center, local_w, local_h
         )
 
         alpha = mask.astype(np.float32) / 255.0
@@ -124,11 +111,7 @@ class PortalRenderer:
         sigma = max(float(self.config.glow_sigma), 0.5)
         radius = max(1, int(round(sigma * 1.5)))
         kernel = radius * 2 + 1
-        blurred = cv2.blur(edges, (kernel, kernel))
-        # A box-filter approximation is intentionally used here: unlike a
-        # large Gaussian kernel it is O(N) in the kernel width and keeps the
-        # glow bounded to the existing ROI.
-        return blurred
+        return cv2.blur(edges, (kernel, kernel))
 
     @staticmethod
     def _add_glow(image, glow):
@@ -147,28 +130,23 @@ class PortalRenderer:
 
         if abs(angle) < 1e-6:
             transformed = resized
+        elif abs(abs(angle) - math.pi * 0.5) < 1e-6:
+            k = 1 if angle > 0 else 3
+            transformed = np.rot90(resized, k=k).copy()
+            transformed = cv2.resize(transformed, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
         else:
-            if abs(abs(angle) - math.pi * 0.5) < 1e-6:
-                k = 1 if angle > 0 else 3
-                transformed = np.rot90(resized, k=k).copy()
-                transformed = cv2.resize(
-                    transformed,
-                    (target_w, target_h),
-                    interpolation=cv2.INTER_LINEAR,
-                )
-            else:
-                matrix = cv2.getRotationMatrix2D(
-                    ((target_w - 1) * 0.5, (target_h - 1) * 0.5),
-                    -math.degrees(angle),
-                    1.0,
-                )
-                transformed = cv2.warpAffine(
-                    resized,
-                    matrix,
-                    (target_w, target_h),
-                    flags=cv2.INTER_LINEAR,
-                    borderMode=cv2.BORDER_REFLECT_101,
-                )
+            matrix = cv2.getRotationMatrix2D(
+                ((target_w - 1) * 0.5, (target_h - 1) * 0.5),
+                -math.degrees(angle),
+                1.0,
+            )
+            transformed = cv2.warpAffine(
+                resized,
+                matrix,
+                (target_w, target_h),
+                flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_REFLECT_101,
+            )
 
         canvas = self._buffer(self._canvas_cache, (local_h, local_w, 3))
         canvas.fill(0)
@@ -186,9 +164,7 @@ class PortalRenderer:
         src_x1 = src_x0 + max(0, dst_x1 - dst_x0)
         src_y1 = src_y0 + max(0, dst_y1 - dst_y0)
         if dst_x1 > dst_x0 and dst_y1 > dst_y0:
-            canvas[dst_y0:dst_y1, dst_x0:dst_x1] = transformed[
-                src_y0:src_y1, src_x0:src_x1
-            ]
+            canvas[dst_y0:dst_y1, dst_x0:dst_x1] = transformed[src_y0:src_y1, src_x0:src_x1]
         return canvas
 
     def _organic_mask(self, shape, center, width, height, angle, t):
@@ -247,9 +223,7 @@ class PortalRenderer:
             theta = np.linspace(0.0, 2.0 * math.pi, count, endpoint=False, dtype=np.float32)
             self._theta_cache[count] = theta
         cx, cy = center
-        wave = 1.0 + 0.06 * np.sin(theta * 5.0 + t * 3.0 + phase) + 0.035 * np.sin(
-            theta * 11.0 - t * 2.2 + phase * 1.7
-        )
+        wave = 1.0 + 0.06 * np.sin(theta * 5.0 + t * 3.0 + phase) + 0.035 * np.sin(theta * 11.0 - t * 2.2 + phase * 1.7)
         x = width * 0.5 * scale * wave * np.cos(theta)
         y = height * 0.5 * scale * wave * np.sin(theta)
         ca = math.cos(angle)
@@ -257,7 +231,7 @@ class PortalRenderer:
         return np.column_stack((x * ca - y * sa + cx, x * sa + y * ca + cy)).astype(np.int32)
 
     def _draw_rings(self, image, center, width, height, angle, t):
-        base = self._buffer(self._energy_cache, image.shape)
+        base = self._buffer(self._ring_cache, image.shape)
         base.fill(0)
         for i in range(self.config.ring_count):
             pulse = 1.0 + 0.035 * math.sin(t * (2.0 + i * 0.55) + i)
@@ -288,7 +262,5 @@ class PortalRenderer:
             y = int(cy + local_x * sa + local_y * ca)
             if 0 <= x < image.shape[1] and 0 <= y < image.shape[0]:
                 size = max(1, int(self.particle_size[i]))
-                brightness = int(
-                    130 + 90 * (0.5 + 0.5 * math.sin(t * 5.0 + self.particle_phase[i]))
-                )
+                brightness = int(130 + 90 * (0.5 + 0.5 * math.sin(t * 5.0 + self.particle_phase[i])))
                 cv2.circle(image, (x, y), size, (brightness // 2, brightness, 255), -1)
