@@ -58,7 +58,7 @@ def main():
     tracker = HandTracker("assets/models/hand_landmarker.task")
     gestures = GestureEngine()
     portal = PortalEngine(min_width=120, max_width=900, aspect_ratio=0.58, smoothing=0.24)
-    fold = SpatialFoldEngine(strength=0.34, falloff=1.35, margin=34, work_scale=0.70)
+    fold = SpatialFoldEngine(strength=0.34, falloff=1.35, margin=40, work_scale=0.70)
     renderer = PortalRenderer()
     dimension = MultiverseDimension(work_scale=0.60)
     show_hand_rig = False
@@ -182,6 +182,7 @@ def main():
                     angle=state.angle,
                     intensity=portal_intensity,
                     motion=motion,
+                    timestamp_ms=timestamp_ms,
                 )
 
                 portal_dimension = dimension.render(
@@ -192,6 +193,7 @@ def main():
                     timestamp_ms,
                     view_x=view_x,
                     view_y=view_y,
+                    view_angle=state.angle,
                 )
                 frame = renderer.render(
                     frame,
