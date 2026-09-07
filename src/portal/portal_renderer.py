@@ -19,16 +19,22 @@ class PortalVisualConfig:
     depth_rings: int = 8
     energy_particles: int = 34
     shape_points: int = 72
+    feedback_alpha: float = 0.18
+    lens_strength: float = 0.10
+    scanline_strength: float = 0.055
+    aberration_strength: float = 0.55
+    motion_echo: float = 0.35
 
 
 class PortalRenderer:
-    """Cinematic organic dimensional aperture with a strictly clipped interior."""
+    """Cinematic organic aperture with clipped temporal/VFX layers."""
 
     def __init__(self, config: PortalVisualConfig | None = None) -> None:
         self.config = config or PortalVisualConfig()
         self._mask_cache: dict[tuple, np.ndarray] = {}
         self._output_cache: dict[tuple[int, int], np.ndarray] = {}
         self._border_cache: dict[tuple[int, int], np.ndarray] = {}
+        self._feedback_cache: dict[tuple[int, int], np.ndarray] = {}
         self._seed = np.random.default_rng(7319).random((max(34, self.config.energy_particles), 4), dtype=np.float32)
 
     @staticmethod
@@ -66,10 +72,11 @@ class PortalRenderer:
         c, s = math.cos(r), math.sin(r)
         return np.column_stack((x * c - y * s + cx, x * s + y * c + cy)).astype(np.float32)
 
-    def render(self, frame, dimension, center, width, height, angle, timestamp_ms, intensity=1.0):
+    def render(self, frame, dimension, center, width, height, angle, timestamp_ms, intensity=1.0, motion=0.0):
         if width <= 0 or height <= 0 or frame.ndim != 3:
             return frame
         intensity = max(0.0, min(1.0, float(intensity)))
+        motion = max(0.0, min(1.0, float(motion)))
         if intensity <= 0.0:
             return frame
 
@@ -95,13 +102,7 @@ class PortalRenderer:
 
         output = self._buffer(self._output_cache, local.shape)
         output[:] = local
-        rotated = cv2.warpAffine(
-            content,
-            cv2.getRotationMatrix2D((target_w * 0.5, target_h * 0.5), -angle, 1.0),
-            (target_w, target_h),
-            flags=cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_REFLECT,
-        )
+        rotated = cv2.warpAffine(content, cv2.getRotationMatrix2D((target_w * 0.5, target_h * 0.5), -angle, 1.0), (target_w, target_h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
         quad = self._rotated_corners(local_center, width, height, angle)
         src = np.array([[0, 0], [target_w - 1, 0], [target_w - 1, target_h - 1]], np.float32)
         affine = cv2.getAffineTransform(src, quad[[0, 1, 2]].astype(np.float32))
@@ -110,20 +111,22 @@ class PortalRenderer:
         mask = self._organic_mask(local.shape[1], local.shape[0], points, self.config.feather)
         alpha = (mask.astype(np.float32) / 255.0 * intensity)[:, :, None]
         output[:] = np.clip(output.astype(np.float32) * (1.0 - alpha) + warped.astype(np.float32) * alpha, 0, 255).astype(np.uint8)
-
-        # Everything below this point is an interior effect. Clip it back to the
-        # organic aperture afterwards so no tunnel/glitch line can leak outside.
         interior_base = output.copy()
+
         self._dimensional_tunnel(output, local_center, width, height, angle, t, intensity)
         self._energy_field(output, local_center, width, height, angle, t, intensity)
         self._particle_field(output, local_center, width, height, angle, t, intensity)
-        self._signal_artifacts(output, local_center, width, height, angle, t, intensity)
+        self._signal_artifacts(output, local_center, width, height, angle, t, intensity, motion)
+        self._temporal_feedback(output, intensity, motion)
+        self._lens_warp(output, local_center, width, height, intensity)
+        self._scanlines(output, intensity)
+        self._chromatic_split(output, intensity, motion)
         self._core_lensing(output, local_center, width, height, angle, t, intensity)
         self._clip_interior(output, interior_base, mask)
 
         border = self._buffer(self._border_cache, (local.shape[0], local.shape[1]))
         border.fill(0)
-        self._draw_border(border, points, t, intensity)
+        self._draw_border(border, points, t, intensity, motion)
         glow = self._glow_from_border(border)
         self._add_glow(output, glow, intensity)
         self._composite_border(output, border, intensity)
@@ -149,7 +152,6 @@ class PortalRenderer:
         image[:] = np.clip(base.astype(np.float32) * (1.0 - alpha) + image.astype(np.float32) * alpha, 0, 255).astype(np.uint8)
 
     def _dimensional_tunnel(self, image, center, width, height, angle, t, intensity):
-        """Nested organic membranes and short rays create depth without long stray lines."""
         rings = max(3, int(self.config.depth_rings))
         for i in range(rings):
             scale = 0.91 - i * 0.085
@@ -160,8 +162,6 @@ class PortalRenderer:
             pts = self._organic_points(c, width, height, angle, t + i * 0.13, self.config.shape_points, scale, 1.0 + i * 0.025)
             value = int(42 + 65 * intensity * (1.0 - i / rings))
             cv2.polylines(image, [np.round(pts).astype(np.int32)], True, value, 1 if i else 2, cv2.LINE_AA)
-
-            # Short perspective spokes only; no corner-to-corner straight beams.
             if i in (0, 2, 4):
                 inner = self._organic_points(c, width, height, angle, t + 0.2, self.config.shape_points, max(0.34, scale - 0.15))
                 step = max(1, len(pts) // 8)
@@ -170,7 +170,6 @@ class PortalRenderer:
                     cv2.line(image, tuple(np.round(pts[j]).astype(int)), tuple(np.round(end).astype(int)), int(38 + 42 * intensity), 1, cv2.LINE_AA)
 
     def _energy_field(self, image, center, width, height, angle, t, intensity):
-        """Broken energy fragments hug the contour instead of shooting away from it."""
         outer = self._organic_points(center, width * 1.015, height * 1.015, angle, t, self.config.shape_points, 1.0, 1.0)
         n = len(outer)
         for i in range(max(10, self.config.energy_particles // 2)):
@@ -193,35 +192,68 @@ class PortalRenderer:
             if 0 <= px < image.shape[1] and 0 <= py < image.shape[0]:
                 cv2.circle(image, (px, py), 1 if p[3] < 0.84 else 2, int(95 + 145 * intensity), -1, cv2.LINE_AA)
 
-    def _signal_artifacts(self, image, center, width, height, angle, t, intensity):
-        """Localized glitch bands are kept short and oriented with the portal."""
+    def _signal_artifacts(self, image, center, width, height, angle, t, intensity, motion):
         cx, cy = center
         h, w = image.shape[:2]
         r = math.radians(angle)
         c, s = math.cos(r), math.sin(r)
-        for i in range(7):
+        count = 7 + int(5 * motion)
+        for i in range(count):
             local_y = ((t * 38.0 * (0.55 + i * 0.09) + i * height * 0.27) % max(height, 1)) - height * 0.5
-            local_x = math.sin(t * 1.7 + i * 2.1) * width * 0.18
-            span = width * (0.12 + 0.025 * (i % 4))
-            x0, x1 = local_x - span, local_x + span
-            y = local_y
-            p0 = (cx + x0 * c - y * s, cy + x0 * s + y * c)
-            p1 = (cx + x1 * c - y * s, cy + x1 * s + y * c)
+            local_x = math.sin(t * 1.7 + i * 2.1) * width * (0.18 + 0.08 * motion)
+            span = width * (0.12 + 0.025 * (i % 4) + 0.04 * motion)
+            p0 = (cx + (local_x - span) * c - local_y * s, cy + (local_x - span) * s + local_y * c)
+            p1 = (cx + (local_x + span) * c - local_y * s, cy + (local_x + span) * s + local_y * c)
             if (0 <= p0[0] < w or 0 <= p1[0] < w) and (0 <= p0[1] < h or 0 <= p1[1] < h):
-                cv2.line(image, tuple(np.round(p0).astype(int)), tuple(np.round(p1).astype(int)), int(20 + 65 * intensity), 1 + int(intensity), cv2.LINE_AA)
-        for i in range(3):
-            local_y = math.sin(t * 2.0 + i * 2.4) * height * 0.28
-            span = width * (0.06 + i * 0.025)
-            for shift in (-1, 1):
-                a = (-span, local_y + shift * 2.0)
-                b = (span, local_y + shift * 2.0)
-                p0 = (cx + a[0] * c - a[1] * s, cy + a[0] * s + a[1] * c)
-                p1 = (cx + b[0] * c - b[1] * s, cy + b[0] * s + b[1] * c)
-                cv2.line(image, tuple(np.round(p0).astype(int)), tuple(np.round(p1).astype(int)), int(28 + 55 * intensity), 1, cv2.LINE_AA)
+                cv2.line(image, tuple(np.round(p0).astype(int)), tuple(np.round(p1).astype(int)), int(20 + 80 * intensity), 1 + int(intensity + motion), cv2.LINE_AA)
+
+    def _temporal_feedback(self, image, intensity, motion):
+        previous = self._feedback_cache.get((image.shape[1], image.shape[0]))
+        if previous is None or previous.shape != image.shape:
+            previous = np.zeros_like(image)
+            self._feedback_cache[(image.shape[1], image.shape[0])] = previous
+        alpha = min(0.42, self.config.feedback_alpha + motion * self.config.motion_echo)
+        if np.any(previous):
+            ghost = cv2.GaussianBlur(previous, (0, 0), 0.6 + 1.8 * motion)
+            image[:] = cv2.addWeighted(image, 1.0 - alpha, ghost, alpha, 0.0)
+        previous[:] = image
+
+    def _lens_warp(self, image, center, width, height, intensity):
+        strength = self.config.lens_strength * intensity
+        if strength <= 0.0:
+            return
+        h, w = image.shape[:2]
+        cx, cy = center
+        yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+        dx, dy = xx - cx, yy - cy
+        nx = dx / max(width * 0.5, 1.0)
+        ny = dy / max(height * 0.5, 1.0)
+        radius = np.minimum(1.0, np.sqrt(nx * nx + ny * ny))
+        factor = 1.0 - strength * radius * radius
+        map_x, map_y = cx + dx * factor, cy + dy * factor
+        image[:] = cv2.remap(image, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+
+    def _scanlines(self, image, intensity):
+        strength = self.config.scanline_strength * intensity
+        if strength <= 0.0:
+            return
+        rows = np.arange(image.shape[0], dtype=np.float32)
+        pattern = 1.0 - strength * (0.5 + 0.5 * np.sin(rows * math.pi))
+        image[:] = np.clip(image.astype(np.float32) * pattern[:, None, None], 0, 255).astype(np.uint8)
+
+    def _chromatic_split(self, image, intensity, motion):
+        strength = self.config.aberration_strength * intensity * (0.25 + 0.75 * motion)
+        if strength <= 0.0:
+            return
+        shift = max(1, int(self.config.chromatic_offset * strength))
+        red = np.roll(image[:, :, 2], shift, axis=1)
+        blue = np.roll(image[:, :, 0], -shift, axis=1)
+        edge = cv2.Canny(cv2.cvtColor(image, cv2.COLOR_BGR2GRAY), 45, 110).astype(np.float32) / 255.0
+        edge *= np.float32(min(1.0, 0.20 + 0.55 * intensity))
+        image[:, :, 2] = np.clip(image[:, :, 2].astype(np.float32) * (1.0 - edge) + red * edge, 0, 255).astype(np.uint8)
+        image[:, :, 0] = np.clip(image[:, :, 0].astype(np.float32) * (1.0 - edge) + blue * edge, 0, 255).astype(np.uint8)
 
     def _core_lensing(self, image, center, width, height, angle, t, intensity):
-        """A pulsing inner lens makes the aperture feel hollow rather than flat."""
-        cx, cy = center
         pulse = 0.42 + 0.08 * math.sin(t * 4.2)
         pts = self._organic_points(center, width, height, angle, t * 0.8, self.config.shape_points, pulse, 0.7)
         cv2.polylines(image, [np.round(pts).astype(np.int32)], True, int(55 + 75 * intensity), 1, cv2.LINE_AA)
@@ -229,44 +261,22 @@ class PortalRenderer:
         cv2.polylines(image, [np.round(inner).astype(np.int32)], True, int(35 + 55 * intensity), 1, cv2.LINE_AA)
 
     @staticmethod
-    def _draw_border(image, points, t, intensity):
+    def _draw_border(image, points, t, intensity, motion):
         pts = np.round(points).astype(np.int32)
-        cv2.polylines(image, [pts], True, 255, max(1, int(round(5 * (0.72 + 0.28 * intensity)))), cv2.LINE_AA)
-        # Chromatic contour is generated from the same closed path, never as loose lines.
-        for shift, value in [(-4, 120), (4, 205)]:
-            cv2.polylines(image, [pts + np.array([shift, 0], np.int32)], True, value, 1, cv2.LINE_AA)
-        n = len(points)
-        for i in range(18):
-            a = int((t * (6.0 + i * 0.19) + i * 17.0) % n)
-            length = max(2, int(n * (0.010 + 0.020 * ((math.sin(t * 1.2 + i) + 1.0) * 0.5))))
-            idx = [(a + j) % n for j in range(length)]
-            cv2.polylines(image, [pts[idx]], False, 255, 1, cv2.LINE_AA)
-
-        # Small dimensional sparks stay attached to the contour.
-        for i in range(10):
-            a = int((i / 10.0) * n + math.sin(t * 2.0 + i) * 2.0) % n
-            p = points[a]
-            q = points[(a + max(2, n // 80)) % n]
-            cv2.line(image, tuple(np.round(p).astype(int)), tuple(np.round(q).astype(int)), 255, 2, cv2.LINE_AA)
+        cv2.polylines(image, [pts], True, int(180 + 70 * intensity), 5, cv2.LINE_AA)
+        n = len(pts)
+        fragments = 12 + int(8 * motion)
+        for i in range(fragments):
+            start = int((t * (5.0 + i * 0.27) + i * 17.0) % n)
+            length = max(2, int(n * (0.008 + 0.012 * ((math.sin(t + i) + 1.0) * 0.5))))
+            idx = [(start + j) % n for j in range(length)]
+            cv2.polylines(image, [pts[idx]], False, int(210 + 45 * intensity), 1 + int(motion * 2), cv2.LINE_AA)
 
     def _glow_from_border(self, border):
-        scale = min(max(float(self.config.glow_scale), 0.35), 1.0)
-        h, w = border.shape
-        if scale >= 0.999:
-            return cv2.GaussianBlur(border, (0, 0), max(1.0, self.config.glow_sigma))
-        sw, sh = max(1, int(round(w * scale))), max(1, int(round(h * scale)))
-        small = cv2.resize(border, (sw, sh), interpolation=cv2.INTER_AREA)
-        small = cv2.GaussianBlur(small, (0, 0), max(1.0, self.config.glow_sigma * scale))
-        return cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR)
+        return cv2.GaussianBlur(border, (0, 0), self.config.glow_sigma)
 
-    @staticmethod
-    def _add_glow(image, glow, intensity):
-        image[:, :, 0] = cv2.addWeighted(image[:, :, 0], 1.0, glow, 0.52 * intensity, 0.0)
-        image[:, :, 1] = cv2.addWeighted(image[:, :, 1], 1.0, glow, 0.37 * intensity, 0.0)
-        image[:, :, 2] = cv2.addWeighted(image[:, :, 2], 1.0, glow, 0.70 * intensity, 0.0)
+    def _add_glow(self, image, glow, intensity):
+        image[:] = np.clip(image.astype(np.float32) + glow.astype(np.float32) * self.config.glow_scale * intensity, 0, 255).astype(np.uint8)
 
-    @staticmethod
-    def _composite_border(image, border, intensity):
-        offset = max(2, int(round(5 * intensity)))
-        image[:, :, 0] = cv2.addWeighted(image[:, :, 0], 1.0, np.roll(border, -offset, axis=1), 0.42 * intensity, 0.0)
-        image[:, :, 2] = cv2.addWeighted(image[:, :, 2], 1.0, np.roll(border, offset, axis=1), 0.54 * intensity, 0.0)
+    def _composite_border(self, image, border, intensity):
+        image[:] = np.clip(image.astype(np.float32) * (1.0 - 0.20 * intensity) + border.astype(np.float32) * (0.45 + 0.55 * intensity), 0, 255).astype(np.uint8)
