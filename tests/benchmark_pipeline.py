@@ -1,6 +1,6 @@
 import time
-import cv2
-from src.camera.camera import Camera
+
+from src.camera.camera import Camera, CameraConfig
 from src.vision.hand_tracker import HandTracker
 from src.gestures.gesture_engine import GestureEngine, GestureType
 from src.portal.portal_engine import PortalEngine
@@ -10,7 +10,7 @@ from src.portal.portal_renderer import PortalRenderer
 MODEL = "assets/models/hand_landmarker.task"
 DURATION = 15.0
 
-camera = Camera()
+camera = Camera(CameraConfig(threaded=True))
 tracker = HandTracker(MODEL)
 gestures = GestureEngine()
 portal = PortalEngine()
@@ -30,6 +30,7 @@ start = time.perf_counter()
 timestamp_ms = 0
 
 print("=== BENCHMARK PIPELINE ===")
+print("Modo cámara: latest-frame threaded capture")
 print("Activa el portal manteniendo DOS manos abiertas frente a la cámara.")
 print("Duración:", DURATION, "s")
 
@@ -69,7 +70,15 @@ try:
             dimension_times.append(time.perf_counter() - t)
 
             t = time.perf_counter()
-            output = renderer.render(frame, portal_dimension, state.center, state.width, state.height, state.angle, timestamp_ms)
+            renderer.render(
+                frame,
+                portal_dimension,
+                state.center,
+                state.width,
+                state.height,
+                state.angle,
+                timestamp_ms,
+            )
             renderer_times.append(time.perf_counter() - t)
         else:
             dimension_times.append(0.0)
@@ -83,8 +92,10 @@ finally:
 
 elapsed = time.perf_counter() - start
 
+
 def avg(values):
     return sum(values) / len(values) * 1000 if values else 0.0
+
 
 print()
 print("=== RESULTADOS ===")
@@ -92,10 +103,10 @@ print("Frames:", frames)
 print("Frames portal activo:", active_frames)
 print("Cobertura portal:", f"{active_frames / max(frames, 1) * 100:.1f}%")
 print("FPS pipeline:", f"{frames / elapsed:.2f}")
-print("Camera:", f"{avg(camera_times):.2f} ms")
+print("Camera read:", f"{avg(camera_times):.3f} ms")
 print("MediaPipe:", f"{avg(vision_times):.2f} ms")
 print("Gestures:", f"{avg(gesture_times):.3f} ms")
 print("Portal:", f"{avg(portal_times):.3f} ms")
-print("Dimension:", f"{avg(dimension_times):.2f} ms")
+print("Dimension activo:", f"{avg(dimension_times):.2f} ms")
 print("Renderer activo:", f"{avg(renderer_times):.2f} ms")
-print("TOTAL:", f"{avg(total_times):.2f} ms")
+print("TOTAL loop:", f"{avg(total_times):.2f} ms")
