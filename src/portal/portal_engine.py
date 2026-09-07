@@ -37,6 +37,7 @@ class PortalEngine:
 
     @staticmethod
     def _smooth_angle(previous: float, current: float, factor: float) -> float:
+        # Shortest angular path prevents artificial full rotations at +/-180 degrees.
         delta = (current - previous + 180.0) % 360.0 - 180.0
         return previous + delta * factor
 
@@ -55,8 +56,17 @@ class PortalEngine:
             self.state = PortalState(False, (0, 0), 0, 0, 0.0)
             return self.state
 
-        left = first[9]
-        right = second[9]
+        # MediaPipe can change the order of the two detected hands from frame to frame.
+        # Never let that reorder define the portal orientation: use screen-space X instead.
+        first_palm = first[9]
+        second_palm = second[9]
+        if first_palm[0] <= second_palm[0]:
+            left = first_palm
+            right = second_palm
+        else:
+            left = second_palm
+            right = first_palm
+
         center_x = (left[0] + right[0]) * 0.5
         center_y = (left[1] + right[1]) * 0.5
         distance = hypot(right[0] - left[0], right[1] - left[1])
