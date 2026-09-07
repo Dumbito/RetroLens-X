@@ -28,17 +28,7 @@ class MultiverseDimension:
         self._scanlines = np.empty((height, width), dtype=np.uint8)
         self._size = key
 
-    def render(
-        self,
-        frame: np.ndarray,
-        width: int,
-        height: int,
-        center: tuple[int, int],
-        timestamp_ms: int,
-        view_x: float = 0.0,
-        view_y: float = 0.0,
-        view_angle: float = 0.0,
-    ) -> np.ndarray:
+    def render(self, frame, width, height, center, timestamp_ms, view_x=0.0, view_y=0.0, view_angle=0.0):
         target_w = max(2, int(round(width)))
         target_h = max(2, int(round(height)))
         work_w = max(2, int(round(target_w * self.work_scale)))
@@ -61,45 +51,41 @@ class MultiverseDimension:
 
         resized = cv2.resize(crop, (work_w, work_h), interpolation=cv2.INTER_LINEAR)
         self._work[:] = resized
-
-        # Comic-like posterization keeps the result visibly different from the camera feed.
         self._work[:] = (self._work // 24) * 24
         cv2.convertScaleAbs(self._work, alpha=1.18, beta=-14, dst=self._work)
 
-        # Animated RGB separation gives the window a dimensional/glitch feel.
         shift = int(round(3.0 + 2.0 * np.sin(timestamp_ms * 0.004)))
         shift_x = int(round(view_x * 3.0))
-        shift_y = int(round(view_y * 2.0))
         self._output[:] = self._work
         blue = self._work[:, :, 0]
         green = self._work[:, :, 1]
         red = self._work[:, :, 2]
-        self._channel[:] = 0
-        if shift + shift_x >= 0:
-            sx = max(0, shift + shift_x)
+
+        total_blue = shift + shift_x
+        if total_blue >= 0:
+            sx = min(work_w - 1, total_blue)
             self._output[:, sx:, 0] = blue[:, :work_w - sx]
         else:
-            sx = min(work_w - 1, -(shift + shift_x))
+            sx = min(work_w - 1, -total_blue)
             self._output[:, :work_w - sx, 0] = blue[:, sx:]
+
         self._output[:, :, 1] = green
-        if shift - shift_x >= 0:
-            sx = max(0, shift - shift_x)
+        total_red = shift - shift_x
+        if total_red >= 0:
+            sx = min(work_w - 1, total_red)
             self._output[:, sx:, 2] = red[:, :work_w - sx]
         else:
-            sx = min(work_w - 1, -(shift - shift_x))
+            sx = min(work_w - 1, -total_red)
             self._output[:, :work_w - sx, 2] = red[:, sx:]
 
         gray = cv2.cvtColor(self._output, cv2.COLOR_BGR2GRAY)
-        cv2.Canny(gray, 70, 150, edges=self._edges)
-        cv2.GaussianBlur(self._edges, (0, 0), 0.8, dst=self._channel)
+        self._edges[:] = cv2.Canny(gray, 70, 150)
+        self._channel[:] = cv2.GaussianBlur(self._edges, (0, 0), 0.8)
         self._output[:, :, 1] = cv2.addWeighted(self._output[:, :, 1], 1.0, self._channel, 0.30, 0.0)
         self._output[:, :, 2] = cv2.addWeighted(self._output[:, :, 2], 1.0, self._edges, 0.18, 0.0)
 
-        # Fine scanlines sell the portal as a separate visual layer.
         yy = np.arange(work_h, dtype=np.int32)[:, None]
         scan = ((yy + int(timestamp_ms * 0.04)) % 6 < 1).astype(np.uint8) * 18
         self._scanlines[:] = np.broadcast_to(scan, (work_h, work_w))
         self._output[:] = cv2.subtract(self._output, self._scanlines[:, :, None])
-
-        result = cv2.resize(self._output, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
-        return result
+        return cv2.resize(self._output, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
