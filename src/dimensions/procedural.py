@@ -44,14 +44,11 @@ class ProceduralDimension:
         work_height = max(1, int(round(height * self.work_scale)))
 
         self._ensure_grid(work_width, work_height)
-        nx = self._nx
-        ny = self._ny
         wave_x = self._wave_x
         wave_y = self._wave_y
         wave_xy = self._wave_xy
         radial_weight = self._radial_weight
         result = self._result
-        assert nx is not None and ny is not None
         assert wave_x is not None and wave_y is not None and wave_xy is not None
         assert radial_weight is not None and result is not None
 
@@ -66,10 +63,12 @@ class ProceduralDimension:
         energy = np.clip(energy, 0.0, 1.0)
 
         np.multiply(energy, 255.0, out=result[:, :, 2], casting="unsafe")
-        np.power(energy, 0.7, out=energy)
-        np.multiply(energy, 180.0, out=result[:, :, 1], casting="unsafe")
-        np.subtract(1.0, energy, out=energy)
-        np.multiply(energy, 220.0, out=result[:, :, 0], casting="unsafe")
+        np.multiply(energy, energy, out=wave1)
+        np.sqrt(energy, out=wave1)
+        np.power(energy, 0.7, out=wave1)
+        np.multiply(wave1, 180.0, out=result[:, :, 1], casting="unsafe")
+        np.subtract(1.0, energy, out=wave1)
+        np.multiply(wave1, 220.0, out=result[:, :, 0], casting="unsafe")
 
         if result.shape[:2] != (height, width):
             return cv2.resize(result, (width, height), interpolation=cv2.INTER_LINEAR)
