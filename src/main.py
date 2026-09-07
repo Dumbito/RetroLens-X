@@ -71,10 +71,23 @@ def main():
 
             if has_portal_geometry and portal_intensity > 0.005:
                 state = portal.state
+                frame_h, frame_w = frame.shape[:2]
+
+                # Use the portal's position and rotation as a subtle camera/parallax cue.
+                # The dimension moves independently from the portal itself, creating depth.
+                view_x = ((state.center[0] / max(frame_w - 1, 1)) - 0.5) * 2.0
+                view_y = ((state.center[1] / max(frame_h - 1, 1)) - 0.5) * 2.0
+                view_x = float(max(-1.0, min(1.0, view_x)))
+                view_y = float(max(-1.0, min(1.0, view_y)))
+                view_angle = math.radians(float(state.angle))
+
                 portal_dimension = dimension.render(
                     state.width,
                     state.height,
                     timestamp_ms,
+                    view_x=view_x,
+                    view_y=view_y,
+                    view_angle=view_angle,
                 )
                 frame = renderer.render(
                     frame,
