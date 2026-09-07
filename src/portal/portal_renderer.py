@@ -16,6 +16,8 @@ class PortalVisualConfig:
     particle_seed: int = 42
     roi_margin: int = 8
     ring_blur_sigma: float = 2.5
+    mask_scale: float = 0.5
+    glow_scale: float = 0.5
 
 
 class PortalRenderer:
@@ -90,7 +92,7 @@ class PortalRenderer:
         ).astype(np.uint8)
 
         edges = cv2.Canny(mask, 70, 180)
-        glow = cv2.GaussianBlur(edges, (0, 0), self.config.glow_sigma)
+        glow = self._glow_from_edges(edges)
         self._add_glow(local_output, glow)
 
         energy = np.zeros_like(local_output)
@@ -104,6 +106,19 @@ class PortalRenderer:
 
         frame[y0:y1, x0:x1] = local_output
         return frame
+
+    def _glow_from_edges(self, edges):
+        scale = min(max(float(self.config.glow_scale), 0.25), 1.0)
+        if scale >= 0.999:
+            return cv2.GaussianBlur(edges, (0, 0), self.config.glow_sigma)
+
+        h, w = edges.shape[:2]
+        small_w = max(1, int(round(w * scale)))
+        small_h = max(1, int(round(h * scale)))
+        small = cv2.resize(edges, (small_w, small_h), interpolation=cv2.INTER_AREA)
+        small_sigma = max(0.5, self.config.glow_sigma * scale)
+        small_glow = cv2.GaussianBlur(small, (0, 0), small_sigma)
+        return cv2.resize(small_glow, (w, h), interpolation=cv2.INTER_LINEAR)
 
     @staticmethod
     def _add_glow(image, glow):
@@ -121,8 +136,6 @@ class PortalRenderer:
         else:
             resized = dimension
 
-        # The source image is transformed within the same target rectangle as
-        # the portal. BORDER_REFLECT keeps the transformed dimension populated.
         if abs(angle) < 1e-6:
             transformed = resized
         else:
@@ -169,6 +182,25 @@ class PortalRenderer:
         return canvas
 
     def _organic_mask(self, shape, center, width, height, angle, t):
+        h, w = shape
+        scale = min(max(float(self.config.mask_scale), 0.25), 1.0)
+        if scale >= 0.999:
+            return self._organic_mask_full(shape, center, width, height, angle, t)
+
+        small_w = max(1, int(round(w * scale)))
+        small_h = max(1, int(round(h * scale)))
+        small_center = (center[0] * scale, center[1] * scale)
+        small_mask = self._organic_mask_full(
+            (small_h, small_w),
+            small_center,
+            float(width) * scale,
+            float(height) * scale,
+            angle,
+            t,
+        )
+        return cv2.resize(small_mask, (w, h), interpolation=cv2.INTER_LINEAR)
+
+    def _organic_mask_full(self, shape, center, width, height, angle, t):
         h, w = shape
         cx, cy = float(center[0]), float(center[1])
         key = (w, h)
