@@ -16,7 +16,7 @@ from src.portal.portal_physics import PortalPhysics
 from src.portal.portal_renderer import PortalRenderer
 from src.portal.spatial_fold import SpatialFoldEngine
 from src.vfx.background_fx import BackgroundFX
-
+from src.vfx.portal_scene import Portal3DScene
 
 CONNECTIONS = [(0,1),(1,2),(2,3),(3,4),(0,5),(5,6),(6,7),(7,8),(5,9),(9,10),(10,11),(11,12),(9,13),(13,14),(14,15),(15,16),(13,17),(17,18),(18,19),(19,20),(0,17)]
 
@@ -34,18 +34,16 @@ def draw_hand_rig(frame, hand):
 def fingertip_distance(hands):
     if len(hands) < 2:
         return None
-    first, second = hands[0].pixel_landmarks, hands[1].pixel_landmarks
-    if len(first) <= 8 or len(second) <= 8:
-        return None
-    return math.hypot(second[8][0] - first[8][0], second[8][1] - first[8][1])
+    a, b = hands[0].pixel_landmarks, hands[1].pixel_landmarks
+    return math.hypot(b[8][0] - a[8][0], b[8][1] - a[8][1]) if len(a) > 8 and len(b) > 8 else None
 
 
 def hand_scale(hands):
     values = []
     for hand in hands[:2]:
-        points = hand.pixel_landmarks
-        if len(points) > 9:
-            value = math.hypot(points[9][0] - points[0][0], points[9][1] - points[0][1])
+        p = hand.pixel_landmarks
+        if len(p) > 9:
+            value = math.hypot(p[9][0] - p[0][0], p[9][1] - p[0][1])
             if value > 1.0:
                 values.append(value)
     return sum(values) / len(values) if values else None
@@ -56,13 +54,13 @@ def hand_points(hands):
 
 
 def blend_dimensions(base, overlay, weight):
-    weight = float(max(0.0, min(1.0, weight)))
+    weight = max(0.0, min(1.0, float(weight)))
     if base.shape != overlay.shape:
         overlay = cv2.resize(overlay, (base.shape[1], base.shape[0]), interpolation=cv2.INTER_LINEAR)
     return np.clip(base.astype(np.float32) * (1.0 - weight) + overlay.astype(np.float32) * weight, 0, 255).astype(np.uint8)
 
 
-def build_portal_pipeline(background, fold, renderer, camera_dimension, comic_dimension, universe):
+def build_portal_pipeline(background, fold, renderer, camera_dimension, comic_dimension, universe, portal_scene):
     def environment(ctx):
         if ctx.phase != "OPEN" or ctx.intensity <= 0.005:
             return ctx
@@ -84,10 +82,10 @@ def build_portal_pipeline(background, fold, renderer, camera_dimension, comic_di
         camera_layer = camera_dimension.render(ctx.frame, state.width, state.height, state.center, ctx.timestamp_ms, view_x=ctx.view_x, view_y=ctx.view_y, view_angle=state.angle)
         comic = comic_dimension.render(state.width, state.height, ctx.timestamp_ms, view_x=ctx.view_x, view_y=ctx.view_y, view_angle=state.angle)
         cosmos = universe.render(state.width, state.height, ctx.timestamp_ms, view_x=ctx.view_x, view_y=ctx.view_y, intensity=ctx.intensity, turbulence=physics.turbulence)
-        cosmic_weight = min(0.88, 0.72 + 0.10 * physics.stability + 0.05 * physics.pulse)
-        comic_weight = 0.16 + 0.06 * physics.turbulence
-        layered = blend_dimensions(camera_layer, comic, comic_weight)
-        layered = blend_dimensions(layered, cosmos, cosmic_weight)
+        scene = portal_scene.render(state.width, state.height, ctx.timestamp_ms, view_x=ctx.view_x, view_y=ctx.view_y, intensity=ctx.intensity)
+        layered = blend_dimensions(camera_layer, comic, 0.16 + 0.06 * physics.turbulence)
+        layered = blend_dimensions(layered, cosmos, min(0.78, 0.62 + 0.08 * physics.stability + 0.04 * physics.pulse))
+        layered = blend_dimensions(layered, scene, portal_scene.config.opacity)
         gain = 0.82 + 0.18 * (1.0 - physics.pressure) + 0.08 * physics.pulse
         ctx.metadata["layered"] = np.clip(layered.astype(np.float32) * gain, 0, 255).astype(np.uint8)
         return ctx
@@ -126,10 +124,11 @@ def main():
     background = BackgroundFX(work_scale=0.55, margin=125)
     fold = SpatialFoldEngine(strength=0.34, falloff=1.35, margin=40, work_scale=0.70)
     renderer = PortalRenderer()
+    portal_scene = Portal3DScene()
     camera_dimension = MultiverseDimension(work_scale=0.60)
     comic_dimension = ProceduralDimension(work_scale=0.46, max_work_width=360, max_work_height=260)
     universe = DimensionalUniverse(work_scale=0.42, max_width=420, max_height=300)
-    portal_pipeline = build_portal_pipeline(background, fold, renderer, camera_dimension, comic_dimension, universe)
+    portal_pipeline = build_portal_pipeline(background, fold, renderer, camera_dimension, comic_dimension, universe, portal_scene)
     lifecycle = PortalStateMachine()
     profiler = PipelineProfiler()
     show_hand_rig = False
@@ -137,7 +136,6 @@ def main():
     portal_intensity = 0.0
     last_time = time.monotonic()
     previous_center = None
-
     try:
         while True:
             profiler.begin_frame()
@@ -159,8 +157,7 @@ def main():
                 previous_center = portal.state.center
             if lifecycle.phase == "OPEN" and distance is not None and scale is not None:
                 state = portal.update(hands, timestamp_ms)
-                open_reference = max(scale * lifecycle.open_ratio, 1.0)
-                opening_ratio = max(0.0, min(1.35, distance / open_reference))
+                opening_ratio = max(0.0, min(1.35, distance / max(scale * lifecycle.open_ratio, 1.0)))
                 physics_state = physics.update(hands, state.center, state.width, state.height, timestamp_ms, opening_ratio=opening_ratio)
                 motion = physics_state.speed
                 if previous_center is not None and delta_time > 0.0:
@@ -171,8 +168,7 @@ def main():
                 opening_ratio, physics_state, motion = 0.0, physics.state, physics.state.speed
                 if lifecycle.phase != "OPEN":
                     previous_center = None
-            target_intensity = 1.0 if lifecycle.phase == "OPEN" else 0.0
-            portal_intensity += (target_intensity - portal_intensity) * (1.0 - math.exp(-delta_time * 12.0))
+            portal_intensity += ((1.0 if lifecycle.phase == "OPEN" else 0.0) - portal_intensity) * (1.0 - math.exp(-delta_time * 12.0))
             ctx = FrameContext(frame=frame, timestamp_ms=timestamp_ms, delta_time=delta_time, hands=tuple(hands), hand_points=hand_points(hands), phase=lifecycle.phase, distance=distance, hand_scale=scale, opening_ratio=opening_ratio, intensity=portal_intensity, motion=motion)
             if lifecycle.phase == "OPEN":
                 state = portal.state
