@@ -8,6 +8,7 @@ from src.vision.hand_tracker import HandTracker
 from src.gestures.gesture_engine import GestureEngine
 from src.portal.portal_engine import PortalEngine
 from src.portal.portal_renderer import PortalRenderer
+from src.portal.spatial_fold import SpatialFoldEngine
 from src.dimensions import MultiverseDimension
 
 
@@ -57,6 +58,7 @@ def main():
     tracker = HandTracker("assets/models/hand_landmarker.task")
     gestures = GestureEngine()
     portal = PortalEngine(min_width=120, max_width=900, aspect_ratio=0.58, smoothing=0.24)
+    fold = SpatialFoldEngine(strength=0.34, falloff=1.35, margin=34, work_scale=0.70)
     renderer = PortalRenderer()
     dimension = MultiverseDimension(work_scale=0.60)
     show_hand_rig = False
@@ -65,11 +67,8 @@ def main():
     phase = "READY"
     lost_since = None
     last_time = time.monotonic()
+    previous_portal_center = None
 
-    # Much more forgiving fingertip gesture:
-    # 1) bring index fingertips close together to arm,
-    # 2) separate them to open,
-    # 3) bring them close again to close.
     ARM_RATIO = 0.72
     OPEN_RATIO = 1.05
     CLOSE_RATIO = 0.78
@@ -121,6 +120,7 @@ def main():
                         lost_since = None
                         portal.reset()
                         portal.update(hands, timestamp_ms)
+                        previous_portal_center = portal.state.center
                     elif distance > arm_distance * 1.65:
                         phase = "READY"
                         armed_since = None
@@ -133,6 +133,7 @@ def main():
                         portal.reset()
                         armed_since = None
                         armed_distance = None
+                        previous_portal_center = None
                     else:
                         portal.update(hands, timestamp_ms)
                         lost_since = None
@@ -145,6 +146,7 @@ def main():
                     lost_since = None
                     armed_since = None
                     armed_distance = None
+                    previous_portal_center = None
                     portal.reset()
             else:
                 phase = "READY"
@@ -163,6 +165,25 @@ def main():
                 view_x = float(max(-1.0, min(1.0, view_x)))
                 view_y = float(max(-1.0, min(1.0, view_y)))
 
+                motion = 0.0
+                if previous_portal_center is not None and delta_time > 0.0:
+                    motion_px_s = math.hypot(
+                        state.center[0] - previous_portal_center[0],
+                        state.center[1] - previous_portal_center[1],
+                    ) / delta_time
+                    motion = min(1.0, motion_px_s / 900.0)
+                previous_portal_center = state.center
+
+                frame = fold.apply(
+                    frame,
+                    state.center,
+                    state.width,
+                    state.height,
+                    angle=state.angle,
+                    intensity=portal_intensity,
+                    motion=motion,
+                )
+
                 portal_dimension = dimension.render(
                     frame,
                     state.width,
@@ -178,7 +199,7 @@ def main():
                     state.center,
                     state.width,
                     state.height,
-                    0.0,
+                    state.angle,
                     timestamp_ms,
                     portal_intensity,
                 )
