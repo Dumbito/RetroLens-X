@@ -35,6 +35,7 @@ class PortalRenderer:
         self._theta_cache: dict[int, np.ndarray] = {}
         self._grid_cache: dict[tuple[int, int], tuple[np.ndarray, np.ndarray]] = {}
         self._canvas_cache: dict[tuple[int, int], np.ndarray] = {}
+        self._content_cache: dict[tuple[int, int], np.ndarray] = {}
         self._ring_cache: dict[tuple[int, int], np.ndarray] = {}
         self._rim_cache: dict[tuple[int, int], np.ndarray] = {}
         self._glow_cache: dict[tuple[int, int], np.ndarray] = {}
@@ -132,8 +133,7 @@ class PortalRenderer:
                 image[:, :, channel], 1.0, glow, weight, 0.0
             )
 
-    @staticmethod
-    def _prepare_content(dimension, width, height, angle, center, local_w, local_h):
+    def _prepare_content(self, dimension, width, height, angle, center, local_w, local_h):
         target_w = max(1, int(round(float(width))))
         target_h = max(1, int(round(float(height))))
         if dimension.shape[1] != target_w or dimension.shape[0] != target_h:
@@ -161,7 +161,13 @@ class PortalRenderer:
                 borderMode=cv2.BORDER_REFLECT_101,
             )
 
-        canvas = np.zeros((local_h, local_w, 3), dtype=np.uint8)
+        key = (local_w, local_h)
+        canvas = self._content_cache.get(key)
+        if canvas is None or canvas.shape != (local_h, local_w, 3):
+            canvas = np.empty((local_h, local_w, 3), dtype=np.uint8)
+            self._content_cache[key] = canvas
+        canvas.fill(0)
+
         cx, cy = center
         x0 = int(round(cx - target_w * 0.5))
         y0 = int(round(cy - target_h * 0.5))
