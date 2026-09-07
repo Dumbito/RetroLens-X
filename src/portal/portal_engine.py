@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import atan2, degrees, hypot
+from math import hypot
 
 
 @dataclass
@@ -14,11 +14,14 @@ class PortalState:
 
 
 class PortalEngine:
+    """Track a rectangular interdimensional window between the index fingertips."""
+
     def __init__(
         self,
-        min_width: int = 140,
+        min_width: int = 120,
         max_width: int = 900,
-        smoothing: float = 0.22,
+        aspect_ratio: float = 0.58,
+        smoothing: float = 0.24,
     ):
         if min_width <= 0:
             raise ValueError("min_width debe ser > 0")
@@ -26,60 +29,48 @@ class PortalEngine:
             raise ValueError("max_width debe ser >= min_width")
         if not 0.0 < smoothing <= 1.0:
             raise ValueError("smoothing debe estar en (0, 1]")
+        if not 0.2 <= aspect_ratio <= 1.0:
+            raise ValueError("aspect_ratio debe estar entre 0.2 y 1.0")
         self.min_width = int(min_width)
         self.max_width = int(max_width)
+        self.aspect_ratio = float(aspect_ratio)
         self.smoothing = float(smoothing)
         self.state = PortalState(False, (0, 0), 0, 0, 0.0)
         self._smoothed_center: tuple[float, float] | None = None
         self._smoothed_width: float | None = None
         self._smoothed_height: float | None = None
-        self._smoothed_angle: float | None = None
 
-    @staticmethod
-    def _smooth_angle(previous: float, current: float, factor: float) -> float:
-        # Shortest angular path prevents artificial full rotations at +/-180 degrees.
-        delta = (current - previous + 180.0) % 360.0 - 180.0
-        return previous + delta * factor
+    def reset(self) -> None:
+        self.state = PortalState(False, (0, 0), 0, 0, 0.0)
+        self._smoothed_center = None
+        self._smoothed_width = None
+        self._smoothed_height = None
 
     def update(self, hands, timestamp_ms: int = 0) -> PortalState:
         if len(hands) < 2:
-            self.state = PortalState(False, (0, 0), 0, 0, 0.0)
-            self._smoothed_center = None
-            self._smoothed_width = None
-            self._smoothed_height = None
-            self._smoothed_angle = None
+            self.reset()
             return self.state
 
         first = hands[0].pixel_landmarks
         second = hands[1].pixel_landmarks
-        if len(first) <= 9 or len(second) <= 9:
-            self.state = PortalState(False, (0, 0), 0, 0, 0.0)
+        if len(first) <= 8 or len(second) <= 8:
+            self.reset()
             return self.state
 
-        # MediaPipe can change the order of the two detected hands from frame to frame.
-        # Never let that reorder define the portal orientation: use screen-space X instead.
-        first_palm = first[9]
-        second_palm = second[9]
-        if first_palm[0] <= second_palm[0]:
-            left = first_palm
-            right = second_palm
-        else:
-            left = second_palm
-            right = first_palm
-
-        center_x = (left[0] + right[0]) * 0.5
-        center_y = (left[1] + right[1]) * 0.5
-        distance = hypot(right[0] - left[0], right[1] - left[1])
-        width = float(max(self.min_width, min(self.max_width, distance * 1.65)))
-        height = max(1.0, width * 0.72)
-        angle = degrees(atan2(right[1] - left[1], right[0] - left[0]))
+        # Index fingertips are the two corners/anchors of the gesture.
+        p1 = first[8]
+        p2 = second[8]
+        distance = hypot(p2[0] - p1[0], p2[1] - p1[1])
+        width = float(max(self.min_width, min(self.max_width, distance * 1.55)))
+        height = max(60.0, width * self.aspect_ratio)
+        center_x = (p1[0] + p2[0]) * 0.5
+        center_y = (p1[1] + p2[1]) * 0.5
 
         factor = self.smoothing
         if self._smoothed_center is None:
             self._smoothed_center = (center_x, center_y)
             self._smoothed_width = width
             self._smoothed_height = height
-            self._smoothed_angle = angle
         else:
             old_x, old_y = self._smoothed_center
             self._smoothed_center = (
@@ -88,25 +79,17 @@ class PortalEngine:
             )
             assert self._smoothed_width is not None
             assert self._smoothed_height is not None
-            assert self._smoothed_angle is not None
             self._smoothed_width += (width - self._smoothed_width) * factor
             self._smoothed_height += (height - self._smoothed_height) * factor
-            self._smoothed_angle = self._smooth_angle(
-                self._smoothed_angle,
-                angle,
-                factor,
-            )
 
         smooth_x, smooth_y = self._smoothed_center
         smooth_width = int(round(self._smoothed_width))
         smooth_height = max(1, int(round(self._smoothed_height)))
-        smooth_angle = self._smoothed_angle
-
         self.state = PortalState(
             active=True,
             center=(int(round(smooth_x)), int(round(smooth_y))),
             width=smooth_width,
             height=smooth_height,
-            angle=smooth_angle,
+            angle=0.0,
         )
         return self.state
