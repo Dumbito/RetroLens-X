@@ -14,6 +14,11 @@ class ProceduralDimension:
         self._nx: np.ndarray | None = None
         self._ny: np.ndarray | None = None
         self._radial: np.ndarray | None = None
+        self._wave_x: np.ndarray | None = None
+        self._wave_y: np.ndarray | None = None
+        self._wave_xy: np.ndarray | None = None
+        self._radial_weight: np.ndarray | None = None
+        self._result: np.ndarray | None = None
 
     def _ensure_grid(self, work_width: int, work_height: int) -> None:
         shape = (work_height, work_width)
@@ -25,6 +30,11 @@ class ProceduralDimension:
         self._nx = nx
         self._ny = ny
         self._radial = np.sqrt((nx - 0.5) ** 2 + (ny - 0.5) ** 2)
+        self._wave_x = nx * 18.0
+        self._wave_y = ny * 14.0
+        self._wave_xy = (nx + ny) * 24.0
+        self._radial_weight = np.clip(1.2 - self._radial * 1.8, 0.0, 1.0)
+        self._result = np.empty((work_height, work_width, 3), dtype=np.uint8)
         self._grid_shape = shape
 
     def render(self, width: int, height: int, timestamp_ms: int) -> np.ndarray:
@@ -36,24 +46,31 @@ class ProceduralDimension:
         self._ensure_grid(work_width, work_height)
         nx = self._nx
         ny = self._ny
-        radial = self._radial
-        assert nx is not None and ny is not None and radial is not None
+        wave_x = self._wave_x
+        wave_y = self._wave_y
+        wave_xy = self._wave_xy
+        radial_weight = self._radial_weight
+        result = self._result
+        assert nx is not None and ny is not None
+        assert wave_x is not None and wave_y is not None and wave_xy is not None
+        assert radial_weight is not None and result is not None
 
         t = timestamp_ms * 0.001
-        wave1 = np.sin(nx * 18.0 + t * 2.0)
-        wave2 = np.sin(ny * 14.0 - t * 1.5)
-        wave3 = np.sin((nx + ny) * 24.0 + t * 3.0)
+        wave1 = np.sin(wave_x + t * 2.0)
+        wave2 = np.sin(wave_y - t * 1.5)
+        wave3 = np.sin(wave_xy + t * 3.0)
 
         energy = (wave1 + wave2 + wave3) * (1.0 / 3.0)
         energy = (energy + 1.0) * 0.5
-        energy *= np.clip(1.2 - radial * 1.8, 0.0, 1.0)
+        energy *= radial_weight
         energy = np.clip(energy, 0.0, 1.0)
 
-        r = (energy * 255.0).astype(np.uint8)
-        g = (np.power(energy, 0.7) * 180.0).astype(np.uint8)
-        b = ((1.0 - energy) * 220.0).astype(np.uint8)
-        result = cv2.merge((b, g, r))
+        np.multiply(energy, 255.0, out=result[:, :, 2], casting="unsafe")
+        np.power(energy, 0.7, out=energy)
+        np.multiply(energy, 180.0, out=result[:, :, 1], casting="unsafe")
+        np.subtract(1.0, energy, out=energy)
+        np.multiply(energy, 220.0, out=result[:, :, 0], casting="unsafe")
 
         if result.shape[:2] != (height, width):
-            result = cv2.resize(result, (width, height), interpolation=cv2.INTER_LINEAR)
+            return cv2.resize(result, (width, height), interpolation=cv2.INTER_LINEAR)
         return result
