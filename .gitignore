@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local model binaries / large assets
+*.task
+assets/models/
+
+# Local backups / experimental copies
+*.backup
+*.bak
+*.preopt2-backup
+*.v050-backup
+*.v051-backup
+*.v052-backup
+*.v053-backup
+
+# Runtime output
+*.log
+*.tmp
+screenshots/
