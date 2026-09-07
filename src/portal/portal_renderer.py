@@ -109,9 +109,13 @@ class PortalRenderer:
 
     def _glow_from_edges(self, edges):
         sigma = max(float(self.config.glow_sigma), 0.5)
-        distances = cv2.distanceTransform(255 - edges, cv2.DIST_L2, 3)
-        glow = np.exp(-(distances * distances) / (2.0 * sigma * sigma)) * 255.0
-        return np.clip(glow, 0.0, 255.0).astype(np.uint8)
+        radius = max(1, int(round(sigma * 1.5)))
+        kernel = radius * 2 + 1
+        blurred = cv2.blur(edges, (kernel, kernel))
+        # A box-filter approximation is intentionally used here: unlike a
+        # large Gaussian kernel it is O(N) in the kernel width and keeps the
+        # glow bounded to the existing ROI.
+        return blurred
 
     @staticmethod
     def _add_glow(image, glow):
