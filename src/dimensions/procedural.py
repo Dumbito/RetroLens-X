@@ -5,191 +5,140 @@ import numpy as np
 
 
 class ProceduralDimension:
-    """Animated procedural dimension with layered depth/parallax."""
+    """Procedural cosmic scene: deep space, stars, nebulae and planets."""
 
-    def __init__(self, work_scale: float = 0.5, max_work_width: int = 360, max_work_height: int = 260):
+    def __init__(self, work_scale: float = 0.5, max_work_width: int = 420, max_work_height: int = 300):
         self.work_scale = float(np.clip(work_scale, 0.25, 1.0))
         self.max_work_width = max(64, int(max_work_width))
         self.max_work_height = max(48, int(max_work_height))
-        self._grid_shape: tuple[int, int] | None = None
-        self._nx: np.ndarray | None = None
-        self._ny: np.ndarray | None = None
-        self._radial: np.ndarray | None = None
-        self._result: np.ndarray | None = None
-        self._energy: np.ndarray | None = None
-        self._local_r: np.ndarray | None = None
-        self._local_a: np.ndarray | None = None
-        self._core: np.ndarray | None = None
-        self._edge_falloff: np.ndarray | None = None
-        self._px: np.ndarray | None = None
-        self._py: np.ndarray | None = None
-        self._wave_a: np.ndarray | None = None
-        self._wave_b: np.ndarray | None = None
-        self._wave_c: np.ndarray | None = None
-        self._wave_d: np.ndarray | None = None
-        self._rings: np.ndarray | None = None
-        self._filaments: np.ndarray | None = None
+        self._grid_shape = None
+        self._nx = self._ny = self._radial = None
+        self._result = self._energy = None
+        self._star_x = self._star_y = self._star_r = self._star_b = None
+        self._star_phase = self._star_twinkle = None
+        self._nebula = self._dust = self._planet = self._scratch = None
 
-    def _ensure_grid(self, work_width: int, work_height: int) -> None:
-        shape = (work_height, work_width)
+    def _ensure_grid(self, w: int, h: int) -> None:
+        shape = (h, w)
         if self._grid_shape == shape:
             return
-
-        y, x = np.mgrid[0:work_height, 0:work_width]
-        nx = x.astype(np.float32) / max(work_width - 1, 1)
-        ny = y.astype(np.float32) / max(work_height - 1, 1)
-        dx = nx - 0.5
-        dy = ny - 0.5
-
-        self._nx = nx
-        self._ny = ny
+        y, x = np.mgrid[0:h, 0:w]
+        self._nx = x.astype(np.float32) / max(w - 1, 1)
+        self._ny = y.astype(np.float32) / max(h - 1, 1)
+        dx = self._nx - 0.5
+        dy = self._ny - 0.5
         self._radial = np.sqrt(dx * dx + dy * dy, dtype=np.float32)
-        self._result = np.empty((work_height, work_width, 3), dtype=np.uint8)
-        self._energy = np.empty((work_height, work_width), dtype=np.float32)
-        self._local_r = np.empty_like(nx)
-        self._local_a = np.empty_like(nx)
-        self._core = np.empty_like(nx)
-        self._edge_falloff = np.empty_like(nx)
-        self._px = np.empty_like(nx)
-        self._py = np.empty_like(nx)
-        self._wave_a = np.empty_like(nx)
-        self._wave_b = np.empty_like(nx)
-        self._wave_c = np.empty_like(nx)
-        self._wave_d = np.empty_like(nx)
-        self._rings = np.empty_like(nx)
-        self._filaments = np.empty_like(nx)
+        self._result = np.empty((h, w, 3), dtype=np.uint8)
+        self._energy = np.empty((h, w), dtype=np.float32)
+        rng = np.random.default_rng(1729)
+        count = max(180, min(700, int(w * h / 130)))
+        self._star_x = rng.uniform(0.02, 0.98, count).astype(np.float32)
+        self._star_y = rng.uniform(0.02, 0.98, count).astype(np.float32)
+        self._star_r = rng.choice(np.array([0.45, 0.65, 0.9, 1.25, 1.8], np.float32), count).astype(np.float32)
+        self._star_b = rng.uniform(0.55, 1.0, count).astype(np.float32)
+        self._star_phase = rng.uniform(0.0, 6.28318, count).astype(np.float32)
+        self._star_twinkle = rng.uniform(0.4, 2.0, count).astype(np.float32)
+        self._nebula = np.empty((h, w), np.float32)
+        self._dust = np.empty((h, w), np.float32)
+        self._planet = np.empty((h, w), np.float32)
+        self._scratch = np.empty((h, w), np.float32)
         self._grid_shape = shape
 
-    def render(
-        self,
-        width: int,
-        height: int,
-        timestamp_ms: int,
-        view_x: float = 0.0,
-        view_y: float = 0.0,
-        view_angle: float = 0.0,
-    ) -> np.ndarray:
+    @staticmethod
+    def _gaussian(x, y, cx, cy, sx, sy):
+        return np.exp(-(((x - cx) / sx) ** 2 + ((y - cy) / sy) ** 2) * 0.5)
+
+    def _draw_stars(self, image, t, vx, vy):
+        h, w = image.shape[:2]
+        for i in range(len(self._star_x)):
+            x = int((self._star_x[i] + vx * 0.035) % 1.0 * (w - 1))
+            y = int((self._star_y[i] + vy * 0.025) % 1.0 * (h - 1))
+            twinkle = 0.72 + 0.28 * np.sin(t * self._star_twinkle[i] + self._star_phase[i])
+            radius = float(self._star_r[i] * (0.75 + 0.25 * twinkle))
+            brightness = int(np.clip(125 + 120 * self._star_b[i] * twinkle, 80, 255))
+            if radius > 1.35:
+                cv2.line(image, (max(0, x - int(radius * 2)), y), (min(w - 1, x + int(radius * 2)), y), (brightness // 2, brightness // 2, brightness), 1)
+                cv2.line(image, (x, max(0, y - int(radius * 2))), (x, min(h - 1, y + int(radius * 2))), (brightness, brightness // 2, brightness // 2), 1)
+            cv2.circle(image, (x, y), max(1, int(round(radius))), (brightness, brightness, brightness), -1)
+
+    def render(self, width: int, height: int, timestamp_ms: int, view_x: float = 0.0, view_y: float = 0.0, view_angle: float = 0.0) -> np.ndarray:
         width = max(1, int(width))
         height = max(1, int(height))
+        requested_w = max(1, int(round(width * self.work_scale)))
+        requested_h = max(1, int(round(height * self.work_scale)))
+        w = max(1, min(requested_w, self.max_work_width))
+        h = max(1, min(requested_h, self.max_work_height))
+        self._ensure_grid(w, h)
 
-        # Keep the simulation resolution bounded and independent from portal size.
-        requested_width = max(1, int(round(width * self.work_scale)))
-        requested_height = max(1, int(round(height * self.work_scale)))
-        work_width = min(requested_width, self.max_work_width)
-        work_height = min(requested_height, self.max_work_height)
-        work_width = max(1, work_width)
-        work_height = max(1, work_height)
-
-        self._ensure_grid(work_width, work_height)
-        nx = self._nx
-        ny = self._ny
-        radial = self._radial
-        result = self._result
-        energy = self._energy
-        local_r = self._local_r
-        local_a = self._local_a
-        core = self._core
-        edge_falloff = self._edge_falloff
-        px = self._px
-        py = self._py
-        wave_a = self._wave_a
-        wave_b = self._wave_b
-        wave_c = self._wave_c
-        wave_d = self._wave_d
-        rings = self._rings
-        filaments = self._filaments
-        assert all(x is not None for x in (
-            nx, ny, radial, result, energy, local_r, local_a,
-            core, edge_falloff, px, py, wave_a, wave_b, wave_c, wave_d,
-            rings, filaments,
-        ))
-
+        nx, ny = self._nx, self._ny
         t = timestamp_ms * 0.001
-        vx = float(np.clip(view_x, -1.0, 1.0))
-        vy = float(np.clip(view_y, -1.0, 1.0))
-        # Portal rotation is rendered by PortalRenderer. Avoid rotating the
-        # procedural texture here as well, which would duplicate a full-frame
-        # transform every frame while the hands are moving.
-        va = 0.0
+        vx = float(np.clip(view_x, -1, 1))
+        vy = float(np.clip(view_y, -1, 1))
 
-        np.multiply(radial, 0.12, out=px)
-        np.add(px, 0.055, out=px)
-        np.multiply(px, vx, out=px)
-        np.add(nx, px, out=px)
+        # Deep-space base: nearly black, with restrained natural warm/cool gradients.
+        neb = self._nebula
+        neb[:] = 0.0
+        for cx, cy, sx, sy, strength in ((0.28, 0.30, 0.26, 0.17, 0.70), (0.73, 0.62, 0.30, 0.20, 0.52), (0.48, 0.82, 0.22, 0.13, 0.38)):
+            neb += self._gaussian(nx, ny, cx + np.sin(t * 0.05) * 0.02, cy, sx, sy) * strength
+        neb *= 0.5 + 0.5 * np.sin(nx * 9.0 + ny * 6.0 + t * 0.10)
+        neb = np.clip(neb, 0, 1)
 
-        np.multiply(radial, 0.10, out=py)
-        np.add(py, 0.045, out=py)
-        np.multiply(py, vy, out=py)
-        np.add(ny, py, out=py)
+        dust = self._dust
+        dust[:] = np.sin(nx * 43.0 + ny * 7.0 + t * 0.35) * np.sin(ny * 31.0 - nx * 5.0)
+        dust *= 0.5
+        dust += 0.5
+        dust *= neb
 
-        np.subtract(px, 0.5, out=local_r)
-        np.subtract(py, 0.5, out=local_a)
-        np.multiply(local_r, local_r, out=rings)
-        np.multiply(local_a, local_a, out=filaments)
-        np.add(rings, filaments, out=local_r)
-        np.sqrt(local_r, out=local_r)
-        np.arctan2(py - 0.5, px - 0.5, out=local_a)
-        local_a += va * 0.22
+        result = self._result
+        result[:, :, 0] = np.clip(4 + neb * 34 + dust * 18, 0, 255).astype(np.uint8)
+        result[:, :, 1] = np.clip(6 + neb * 44 + dust * 25, 0, 255).astype(np.uint8)
+        result[:, :, 2] = np.clip(8 + neb * 48 + dust * 28, 0, 255).astype(np.uint8)
 
-        np.sin(px * 15.0 + t * 1.8, out=wave_a)
-        np.sin(py * 11.0 - t * 1.35, out=wave_b)
-        np.sin((px + py) * 21.0 + t * 2.4, out=wave_c)
-        np.sin(local_a * 7.0 - local_r * 30.0 - t * 3.2, out=wave_d)
+        # Broad warm stellar-cloud lane: keeps the palette from becoming only blue/purple.
+        warm = np.exp(-((ny - (0.48 + 0.11 * np.sin(nx * 4.5 + t * 0.08))) / 0.115) ** 2)
+        result[:, :, 0] = np.clip(result[:, :, 0].astype(np.float32) + warm * 32, 0, 255).astype(np.uint8)
+        result[:, :, 1] = np.clip(result[:, :, 1].astype(np.float32) + warm * 24, 0, 255).astype(np.uint8)
+        result[:, :, 2] = np.clip(result[:, :, 2].astype(np.float32) + warm * 10, 0, 255).astype(np.uint8)
 
-        np.multiply(wave_a, 0.22, out=energy)
-        energy += wave_b * 0.18
-        energy += wave_c * 0.20
-        energy += wave_d * 0.40
-        energy += 1.0
-        energy *= 0.5
+        self._draw_stars(result, t, vx, vy)
 
-        np.multiply(local_r, 8.5, out=rings)
-        rings -= t * 0.75
-        rings += local_a * 0.18
-        rings %= 1.0
-        rings -= 0.5
-        np.multiply(rings, rings, out=rings)
-        rings *= -1.0 / 0.045
-        np.exp(rings, out=rings)
+        # Three subtle planets: one large limb, two distant bodies. They are composited
+        # procedurally and remain secondary to the live camera portal.
+        for cx, cy, radius, light, rgb in ((0.74, 0.30, 0.105, (-0.35, -0.35), (112, 142, 168)), (0.22, 0.72, 0.055, (-0.5, -0.4), (156, 126, 82)), (0.86, 0.78, 0.032, (-0.6, -0.5), (105, 125, 132))):
+            px = nx - (cx + vx * radius * 0.12)
+            py = ny - (cy + vy * radius * 0.10)
+            rr = np.sqrt(px * px + py * py)
+            mask = rr < radius
+            if not np.any(mask):
+                continue
+            z = np.clip(np.sqrt(np.maximum(0.0, 1.0 - (rr / radius) ** 2)), 0, 1)
+            lightx, lighty = light
+            lambert = np.clip(((-px * lightx) + (-py * lighty)) / radius, 0, 1) * z
+            atmosphere = np.clip((1.0 - rr / radius) * 0.65, 0, 1)
+            for c, base in enumerate(rgb):
+                plane = result[:, :, c].astype(np.float32)
+                shade = base * (0.10 + 0.90 * lambert)
+                plane[mask] = np.clip(plane[mask] * 0.22 + shade[mask], 0, 255)
+                plane[mask] += atmosphere[mask] * (24 if c == 2 else 10)
+                result[:, :, c] = np.clip(plane, 0, 255).astype(np.uint8)
+            # faint limb rim
+            rim = np.clip((rr - radius * 0.91) / (radius * 0.09), 0, 1)
+            rim *= mask
+            result[:, :, 0] = np.clip(result[:, :, 0].astype(np.float32) + rim * 18, 0, 255).astype(np.uint8)
+            result[:, :, 1] = np.clip(result[:, :, 1].astype(np.float32) + rim * 22, 0, 255).astype(np.uint8)
+            result[:, :, 2] = np.clip(result[:, :, 2].astype(np.float32) + rim * 28, 0, 255).astype(np.uint8)
 
-        np.multiply(local_r, -9.0, out=core)
-        np.exp(core, out=core)
-
-        np.multiply(local_r, -2.0, out=edge_falloff)
-        edge_falloff += 1.15
-        np.clip(edge_falloff, 0.0, 1.0, out=edge_falloff)
-
-        energy *= 0.62
-        energy += rings * 0.28
-        energy += core * 0.35
-        np.clip(energy, 0.0, 1.0, out=energy)
-        energy *= edge_falloff
-
-        np.multiply(local_a, 13.0, out=filaments)
-        filaments += local_r * 42.0 - t * 4.0
-        np.sin(filaments, out=filaments)
-        filaments *= 0.5
-        filaments += 0.5
-        filaments *= core
-        filaments *= 0.22
-        energy += filaments
-        np.clip(energy, 0.0, 1.0, out=energy)
-
-        np.multiply(energy, 205.0, out=wave_a)
-        result[:, :, 0] = wave_a.astype(np.uint8)
-        np.sqrt(energy, out=wave_b)
-        wave_b *= 225.0
-        result[:, :, 1] = wave_b.astype(np.uint8)
-        np.multiply(energy, 255.0, out=wave_c)
-        wave_c += core * 35.0
-        np.clip(wave_c, 0.0, 255.0, out=wave_c)
-        result[:, :, 2] = wave_c.astype(np.uint8)
-
-        wave_d[:] = result[:, :, 1]
-        wave_d += core * 22.0
-        np.clip(wave_d, 0.0, 255.0, out=wave_d)
-        result[:, :, 1] = wave_d.astype(np.uint8)
+        # Central dimensional core and subtle concentric depth rings.
+        dx = nx - 0.5 + vx * 0.05
+        dy = ny - 0.5 + vy * 0.05
+        r = np.sqrt(dx * dx + dy * dy)
+        core = np.exp(-r * 10.0)
+        rings = 0.5 + 0.5 * np.sin(r * 34.0 - t * 1.8 + np.sin(np.arctan2(dy, dx) * 5.0) * 1.5)
+        rings *= np.exp(-r * 3.2) * 0.16
+        result[:, :, 0] = np.clip(result[:, :, 0].astype(np.float32) + core * 28 + rings * 15, 0, 255).astype(np.uint8)
+        result[:, :, 1] = np.clip(result[:, :, 1].astype(np.float32) + core * 42 + rings * 20, 0, 255).astype(np.uint8)
+        result[:, :, 2] = np.clip(result[:, :, 2].astype(np.float32) + core * 50 + rings * 24, 0, 255).astype(np.uint8)
 
         if result.shape[:2] != (height, width):
-            return cv2.resize(result, (width, height), interpolation=cv2.INTER_LINEAR)
+            result = cv2.resize(result, (width, height), interpolation=cv2.INTER_LINEAR)
         return result
