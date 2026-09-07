@@ -4,7 +4,7 @@ import cv2
 
 from src.camera.camera import Camera
 from src.vision.hand_tracker import HandTracker
-from src.gestures.gesture_engine import GestureEngine, GestureType
+from src.gestures.gesture_engine import GestureEngine
 from src.portal.portal_engine import PortalEngine
 from src.portal.portal_renderer import PortalRenderer
 from src.dimensions import ProceduralDimension
@@ -45,31 +45,24 @@ def main():
             timestamp_ms = time.monotonic_ns() // 1_000_000
 
             hands = tracker.detect(frame, timestamp_ms)
-            detected = gestures.detect(hands, timestamp_ms)
+            gestures.detect(hands, timestamp_ms)
 
             if show_hand_rig:
                 for hand in hands:
                     draw_hand_rig(frame, hand)
 
-            open_hand_indices = [
-                gesture.hand_index
-                for gesture in detected
-                if gesture.type == GestureType.OPEN_HAND
-            ]
-            open_hands = [
-                hands[index]
-                for index in open_hand_indices
-                if 0 <= index < len(hands)
-            ]
-
-            if len(open_hands) >= 2:
-                portal.update(open_hands[:2], timestamp_ms)
+            if gestures.two_hand_open:
+                portal.update(hands, timestamp_ms)
             else:
                 portal.state.active = False
 
             if portal.state.active:
                 state = portal.state
-                portal_dimension = dimension.render(state.width, state.height, timestamp_ms)
+                portal_dimension = dimension.render(
+                    state.width,
+                    state.height,
+                    timestamp_ms,
+                )
                 frame = renderer.render(
                     frame,
                     portal_dimension,
@@ -81,9 +74,33 @@ def main():
                 )
 
             status = "PORTAL ACTIVE" if portal.state.active else "PORTAL STANDBY"
-            cv2.putText(frame, status, (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-            cv2.putText(frame, "2 OPEN HANDS = OPEN PORTAL", (20, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-            cv2.putText(frame, "H = HAND RIG | Q / ESC = EXIT", (20, 92), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+            cv2.putText(
+                frame,
+                status,
+                (20, 35),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (255, 255, 255),
+                2,
+            )
+            cv2.putText(
+                frame,
+                "2 OPEN HANDS = OPEN PORTAL",
+                (20, 65),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (255, 255, 255),
+                1,
+            )
+            cv2.putText(
+                frame,
+                "H = HAND RIG | Q / ESC = EXIT",
+                (20, 92),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (255, 255, 255),
+                1,
+            )
 
             cv2.imshow("RetroLens-X", frame)
             key = cv2.waitKey(1) & 0xFF
