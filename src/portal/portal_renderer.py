@@ -73,8 +73,6 @@ class PortalRenderer:
             t,
         )
 
-        # Build the dimension directly in the same local coordinate system as
-        # the mask. This avoids double-centering/cropping when the portal rotates.
         content = self._prepare_content(
             dimension,
             width,
@@ -123,24 +121,18 @@ class PortalRenderer:
         else:
             resized = cv2.resize(dimension, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
 
-        # Rotation uses a full bounding canvas, then the result is placed around
-        # the exact same center used by the portal mask/rings/rim.
-        sin_a = abs(math.sin(angle))
-        cos_a = abs(math.cos(angle))
-        rotated_w = max(1, int(math.ceil(target_w * cos_a + target_h * sin_a)))
-        rotated_h = max(1, int(math.ceil(target_w * sin_a + target_h * cos_a)))
-
-        if abs(angle) < 1e-6:
+        if abs(math.sin(angle)) < 1e-6:
             rotated = resized
         else:
-            source_center = ((target_w - 1) * 0.5, (target_h - 1) * 0.5)
-            matrix = cv2.getRotationMatrix2D(source_center, -math.degrees(angle), 1.0)
-            matrix[0, 2] += (rotated_w - target_w) * 0.5
-            matrix[1, 2] += (rotated_h - target_h) * 0.5
+            rotation_matrix = cv2.getRotationMatrix2D(
+                ((target_w - 1) * 0.5, (target_h - 1) * 0.5),
+                -math.degrees(angle),
+                1.0,
+            )
             rotated = cv2.warpAffine(
                 resized,
-                matrix,
-                (rotated_w, rotated_h),
+                rotation_matrix,
+                (target_w, target_h),
                 flags=cv2.INTER_LINEAR,
                 borderMode=cv2.BORDER_CONSTANT,
                 borderValue=(0, 0, 0),
