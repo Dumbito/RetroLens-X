@@ -38,14 +38,14 @@ class PortalRenderer:
             return frame
 
         frame_h, frame_w = frame.shape[:2]
-        cx, cy = int(round(center[0])), int(round(center[1]))
+        cx, cy = int(round(float(center[0]))), int(round(float(center[1])))
         angle_rad = math.radians(float(angle))
         rx = max(float(width) * 0.5, 1.0)
         ry = max(float(height) * 0.5, 1.0)
         ca = abs(math.cos(angle_rad))
         sa = abs(math.sin(angle_rad))
         margin = max(
-            self.config.roi_margin,
+            int(self.config.roi_margin),
             int(math.ceil(self.config.glow_sigma * 3.0 + self.config.edge_thickness + 4)),
         )
 
@@ -61,7 +61,7 @@ class PortalRenderer:
         local_center = (cx - x0, cy - y0)
         local_h = y1 - y0
         local_w = x1 - x0
-        t = timestamp_ms * 0.001
+        t = float(timestamp_ms) * 0.001
         local_frame = frame[y0:y1, x0:x1]
 
         mask = self._organic_mask(
@@ -84,10 +84,9 @@ class PortalRenderer:
         )
 
         alpha = mask.astype(np.float32) / 255.0
-        alpha_3 = alpha[..., None]
         local_output = (
-            local_frame.astype(np.float32) * (1.0 - alpha_3)
-            + content.astype(np.float32) * alpha_3
+            local_frame.astype(np.float32) * (1.0 - alpha[..., None])
+            + content.astype(np.float32) * alpha[..., None]
         ).astype(np.uint8)
 
         edges = cv2.Canny(mask, 70, 180)
@@ -97,11 +96,11 @@ class PortalRenderer:
         energy = np.zeros_like(local_output)
         self._draw_rings(energy, local_center, width, height, angle_rad, t)
         self._draw_particles(energy, local_center, width, height, angle_rad, t)
-        cv2.addWeighted(local_output, 1.0, energy, 0.82, 0.0, dst=local_output)
+        local_output = cv2.addWeighted(local_output, 1.0, energy, 0.82, 0.0)
 
         rim = np.zeros_like(local_output)
         self._draw_rim(rim, local_center, width, height, angle_rad, t)
-        cv2.addWeighted(local_output, 1.0, rim, 0.95, 0.0, dst=local_output)
+        local_output = cv2.addWeighted(local_output, 1.0, rim, 0.95, 0.0)
 
         frame[y0:y1, x0:x1] = local_output
         return frame
@@ -109,47 +108,50 @@ class PortalRenderer:
     @staticmethod
     def _add_glow(image, glow):
         for channel, weight in enumerate((0.55, 0.41, 0.19)):
-            blended = cv2.addWeighted(image[:, :, channel], 1.0, glow, weight, 0.0)
-            image[:, :, channel] = blended
+            image[:, :, channel] = cv2.addWeighted(
+                image[:, :, channel], 1.0, glow, weight, 0.0
+            )
 
     @staticmethod
     def _prepare_content(dimension, width, height, angle, center, local_w, local_h):
-        target_w = max(1, int(round(width)))
-        target_h = max(1, int(round(height)))
-        if dimension.shape[1] == target_w and dimension.shape[0] == target_h:
-            resized = dimension
-        else:
+        target_w = max(1, int(round(float(width))))
+        target_h = max(1, int(round(float(height))))
+        if dimension.shape[1] != target_w or dimension.shape[0] != target_h:
             resized = cv2.resize(dimension, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
-
-        if abs(math.sin(angle)) < 1e-6:
-            rotated = resized
         else:
-            rotation_matrix = cv2.getRotationMatrix2D(
+            resized = dimension
+
+        # Keep the content inside the same axis-aligned bounding box as the
+        # portal mask. At 90° the portal dimensions intentionally stay WxH:
+        # the visual rotates, but the mask geometry remains stable.
+        if abs(math.sin(angle)) < 1e-6:
+            transformed = resized
+        else:
+            matrix = cv2.getRotationMatrix2D(
                 ((target_w - 1) * 0.5, (target_h - 1) * 0.5),
                 -math.degrees(angle),
                 1.0,
             )
-            rotated = cv2.warpAffine(
+            transformed = cv2.warpAffine(
                 resized,
-                rotation_matrix,
+                matrix,
                 (target_w, target_h),
                 flags=cv2.INTER_LINEAR,
-                borderMode=cv2.BORDER_CONSTANT,
-                borderValue=(0, 0, 0),
+                borderMode=cv2.BORDER_REFLECT_101,
             )
 
         canvas = np.zeros((local_h, local_w, 3), dtype=np.uint8)
         cx, cy = center
-        x = int(round(cx - rotated.shape[1] * 0.5))
-        y = int(round(cy - rotated.shape[0] * 0.5))
+        x = int(round(cx - target_w * 0.5))
+        y = int(round(cy - target_h * 0.5))
         src_x0 = max(0, -x)
         src_y0 = max(0, -y)
         dst_x0 = max(0, x)
         dst_y0 = max(0, y)
-        copy_w = min(rotated.shape[1] - src_x0, local_w - dst_x0)
-        copy_h = min(rotated.shape[0] - src_y0, local_h - dst_y0)
+        copy_w = min(target_w - src_x0, local_w - dst_x0)
+        copy_h = min(target_h - src_y0, local_h - dst_y0)
         if copy_w > 0 and copy_h > 0:
-            canvas[dst_y0:dst_y0 + copy_h, dst_x0:dst_x0 + copy_w] = rotated[
+            canvas[dst_y0:dst_y0 + copy_h, dst_x0:dst_x0 + copy_w] = transformed[
                 src_y0:src_y0 + copy_h,
                 src_x0:src_x0 + copy_w,
             ]
@@ -157,7 +159,7 @@ class PortalRenderer:
 
     def _organic_mask(self, shape, center, width, height, angle, t):
         h, w = shape
-        cx, cy = center
+        cx, cy = float(center[0]), float(center[1])
         key = (w, h)
         grid = self._grid_cache.get(key)
         if grid is None:
@@ -172,10 +174,15 @@ class PortalRenderer:
         sa = math.sin(angle)
         xr = dx * ca + dy * sa
         yr = -dx * sa + dy * ca
-        rx = max(width * 0.5, 1.0)
-        ry = max(height * 0.5, 1.0)
+        rx = max(float(width) * 0.5, 1.0)
+        ry = max(float(height) * 0.5, 1.0)
         theta = np.arctan2(yr, xr)
-        wave = 1.0 + 0.075 * np.sin(theta * 5.0 + t * 3.2) + 0.045 * np.sin(theta * 9.0 - t * 2.1) + 0.025 * np.sin(theta * 14.0 + t * 4.7)
+        wave = (
+            1.0
+            + 0.075 * np.sin(theta * 5.0 + t * 3.2)
+            + 0.045 * np.sin(theta * 9.0 - t * 2.1)
+            + 0.025 * np.sin(theta * 14.0 + t * 4.7)
+        )
         radius = np.sqrt((xr / rx) ** 2 + (yr / ry) ** 2)
         boundary = radius / wave
         alpha = np.clip((1.0 - boundary) / 0.035 + 0.5, 0.0, 1.0)
@@ -187,7 +194,9 @@ class PortalRenderer:
             theta = np.linspace(0.0, 2.0 * math.pi, count, endpoint=False, dtype=np.float32)
             self._theta_cache[count] = theta
         cx, cy = center
-        wave = 1.0 + 0.06 * np.sin(theta * 5.0 + t * 3.0 + phase) + 0.035 * np.sin(theta * 11.0 - t * 2.2 + phase * 1.7)
+        wave = 1.0 + 0.06 * np.sin(theta * 5.0 + t * 3.0 + phase) + 0.035 * np.sin(
+            theta * 11.0 - t * 2.2 + phase * 1.7
+        )
         x = width * 0.5 * scale * wave * np.cos(theta)
         y = height * 0.5 * scale * wave * np.sin(theta)
         ca = math.cos(angle)
@@ -203,8 +212,8 @@ class PortalRenderer:
             cv2.polylines(layer, [pts], True, (90, 170, 245), 2 if i == 1 else 1, cv2.LINE_AA)
             if self.config.ring_blur_sigma > 0:
                 blur = cv2.GaussianBlur(layer, (0, 0), self.config.ring_blur_sigma)
-                cv2.addWeighted(image, 1.0, blur, 0.45, 0.0, dst=image)
-            cv2.addWeighted(image, 1.0, layer, 0.75, 0.0, dst=image)
+                image = cv2.addWeighted(image, 1.0, blur, 0.45, 0.0)
+            image[:] = cv2.addWeighted(image, 1.0, layer, 0.75, 0.0)
 
     def _draw_rim(self, image, center, width, height, angle, t):
         pts = self._ellipse_points(center, width, height, angle, t, 0.0, 1.0, 220)
@@ -225,5 +234,7 @@ class PortalRenderer:
             y = int(cy + local_x * sa + local_y * ca)
             if 0 <= x < image.shape[1] and 0 <= y < image.shape[0]:
                 size = max(1, int(self.particle_size[i]))
-                brightness = int(130 + 90 * (0.5 + 0.5 * math.sin(t * 5.0 + self.particle_phase[i])))
+                brightness = int(
+                    130 + 90 * (0.5 + 0.5 * math.sin(t * 5.0 + self.particle_phase[i]))
+                )
                 cv2.circle(image, (x, y), size, (brightness // 2, brightness, 255), -1)
