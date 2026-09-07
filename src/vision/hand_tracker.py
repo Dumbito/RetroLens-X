@@ -61,6 +61,7 @@ class HandTracker:
             return []
 
         hands: list[Hand] = []
+        handedness_result = result.handedness or ()
         for index, landmarks in enumerate(result.hand_landmarks):
             pixel_landmarks = [
                 (
@@ -75,8 +76,8 @@ class HandTracker:
 
             handedness = "Unknown"
             score = 0.0
-            if result.handedness and index < len(result.handedness):
-                categories = result.handedness[index]
+            if index < len(handedness_result):
+                categories = handedness_result[index]
                 if categories:
                     category = categories[0]
                     handedness = category.category_name
