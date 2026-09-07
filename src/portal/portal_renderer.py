@@ -24,6 +24,9 @@ class PortalVisualConfig:
     scanline_strength: float = 0.055
     aberration_strength: float = 0.55
     motion_echo: float = 0.35
+    fracture_count: int = 16
+    fracture_length: float = 54.0
+    fracture_strength: float = 0.82
 
 
 class PortalRenderer:
@@ -35,6 +38,7 @@ class PortalRenderer:
         self._output_cache: dict[tuple[int, int], np.ndarray] = {}
         self._border_cache: dict[tuple[int, int], np.ndarray] = {}
         self._feedback_cache: dict[tuple[int, int], np.ndarray] = {}
+        self._fracture_cache: dict[tuple[int, int], np.ndarray] = {}
         self._seed = np.random.default_rng(7319).random((max(34, self.config.energy_particles), 4), dtype=np.float32)
 
     @staticmethod
@@ -80,7 +84,7 @@ class PortalRenderer:
         t = timestamp_ms * 0.001
         pulse = 1.0 + 0.018 * math.sin(t * 5.0)
         outer_global = self._organic_points((cx, cy), width * pulse, height * pulse, angle, t, self.config.shape_points, 1.0, 1.0)
-        margin = max(int(self.config.roi_margin), int(self.config.glow_sigma * 2.5))
+        margin = max(int(self.config.roi_margin), int(self.config.glow_sigma * 2.5), int(self.config.fracture_length) + 18)
         x0 = max(0, int(math.floor(outer_global[:, 0].min())) - margin)
         y0 = max(0, int(math.floor(outer_global[:, 1].min())) - margin)
         x1 = min(w, int(math.ceil(outer_global[:, 0].max())) + margin + 1)
@@ -118,7 +122,8 @@ class PortalRenderer:
         self._draw_border(border, points, t, intensity, motion)
         glow = self._glow_from_border(border)
         self._add_glow(output, glow, intensity)
-        self._composite_border(output, border, intensity)
+        self._composite_border(output, border, intensity, mask)
+        self._draw_multiverse_fractures(output, local_center, width, height, angle, t, intensity, motion, mask)
         frame[y0:y1, x0:x1] = output
         return frame
 
@@ -265,6 +270,66 @@ class PortalRenderer:
             glow = glow[:, :, None]
         image[:] = np.clip(image.astype(np.float32) + glow.astype(np.float32) * self.config.glow_scale * intensity, 0, 255).astype(np.uint8)
 
-    def _composite_border(self, image, border, intensity):
+    def _composite_border(self, image, border, intensity, mask):
         border_rgb = border[:, :, None] if border.ndim == 2 else border
-        image[:] = np.clip(image.astype(np.float32) * (1.0 - 0.20 * intensity) + border_rgb.astype(np.float32) * (0.45 + 0.55 * intensity), 0, 255).astype(np.uint8)
+        border_alpha = np.minimum(1.0, border.astype(np.float32) / 255.0 * (0.45 + 0.55 * intensity))
+        edge_only = np.maximum(0.0, border_alpha - (mask.astype(np.float32) / 255.0) * 0.35)[:, :, None]
+        image[:] = np.clip(image.astype(np.float32) * (1.0 - edge_only) + border_rgb.astype(np.float32) * edge_only, 0, 255).astype(np.uint8)
+
+    def _draw_multiverse_fractures(self, image, center, width, height, angle, t, intensity, motion, portal_mask):
+        """Draw localized dimensional cracks outside the aperture, never a full ROI overlay."""
+        h, w = image.shape[:2]
+        if h < 20 or w < 20:
+            return
+        count = int(self.config.fracture_count + motion * 8.0)
+        layer = self._fracture_cache.get((w, h))
+        if layer is None or layer.shape != image.shape:
+            layer = np.zeros_like(image)
+            self._fracture_cache[(w, h)] = layer
+        layer.fill(0)
+
+        cx, cy = float(center[0]), float(center[1])
+        r = math.radians(angle)
+        c, s = math.cos(r), math.sin(r)
+        points = self._organic_points(center, width * 1.01, height * 1.01, angle, t, self.config.shape_points, 1.0, 1.0)
+        n = len(points)
+
+        for i in range(count):
+            idx = int((i * 37.0 + t * (4.0 + i * 0.17)) % n)
+            px, py = float(points[idx, 0]), float(points[idx, 1])
+            nx, ny = px - cx, py - cy
+            norm = math.hypot(nx, ny)
+            if norm < 1.0:
+                continue
+            nx, ny = nx / norm, ny / norm
+            tangent_x, tangent_y = -ny, nx
+            base = 10.0 + 13.0 * ((math.sin(t * 1.7 + i * 2.3) + 1.0) * 0.5)
+            length = self.config.fracture_length * (0.55 + 0.65 * ((math.sin(i * 1.91 + t * 0.7) + 1.0) * 0.5))
+            length *= 0.82 + 0.38 * motion
+            segments = 4 + (i % 3)
+            crack = [(px + nx * base, py + ny * base)]
+            for j in range(segments):
+                u = (j + 1) / segments
+                jitter = math.sin(i * 4.7 + j * 2.6 + t * 2.1) * (5.0 + 5.0 * motion)
+                bend = (math.sin(i * 2.2 + j * 1.7 + t) * 0.035 + 0.018) * length
+                dist = base + u * length
+                crack.append((px + nx * dist + tangent_x * (jitter + bend), py + ny * dist + tangent_y * (jitter + bend)))
+            pts = np.round(np.asarray(crack, np.float32)).astype(np.int32)
+            if np.max(pts[:, 0]) < 0 or np.min(pts[:, 0]) >= w or np.max(pts[:, 1]) < 0 or np.min(pts[:, 1]) >= h:
+                continue
+            phase = (i * 0.73 + t * 1.4) % math.tau
+            red = int(150 + 90 * ((math.sin(phase) + 1.0) * 0.5) * intensity)
+            blue = int(175 + 80 * ((math.cos(phase * 1.3) + 1.0) * 0.5) * intensity)
+            green = int(115 + 75 * motion)
+            cv2.polylines(layer, [pts], False, (blue, green, red), 1 + int(motion), cv2.LINE_AA)
+            if i % 3 == 0:
+                cv2.line(layer, tuple(pts[1]), tuple(pts[min(2, len(pts) - 1)]), (255, 255, 255), 1, cv2.LINE_AA)
+
+        # Keep cracks outside the aperture, with a small overlap at the edge for a torn-reality look.
+        outer = cv2.dilate(portal_mask, np.ones((9, 9), np.uint8), iterations=1)
+        ring = np.clip(outer.astype(np.int16) - cv2.erode(portal_mask, np.ones((5, 5), np.uint8), iterations=1).astype(np.int16), 0, 255).astype(np.uint8)
+        alpha = (ring.astype(np.float32) / 255.0 * self.config.fracture_strength * intensity)[:, :, None]
+        glow = cv2.GaussianBlur(layer, (0, 0), 4.0 + 2.0 * motion)
+        glow_alpha = alpha * 0.42
+        image[:] = np.clip(image.astype(np.float32) + glow.astype(np.float32) * glow_alpha, 0, 255).astype(np.uint8)
+        image[:] = np.clip(image.astype(np.float32) * (1.0 - alpha) + layer.astype(np.float32) * alpha, 0, 255).astype(np.uint8)
