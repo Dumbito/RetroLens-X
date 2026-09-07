@@ -51,6 +51,14 @@ class PortalRenderer:
             cache[key] = buffer
         return buffer
 
+    def _single_buffer(self, cache: dict[tuple[int, int], np.ndarray], shape: tuple[int, int]) -> np.ndarray:
+        key = (shape[1], shape[0])
+        buffer = cache.get(key)
+        if buffer is None or buffer.shape != shape:
+            buffer = np.empty(shape, dtype=np.uint8)
+            cache[key] = buffer
+        return buffer
+
     def _float_buffer(self, cache: dict[tuple[int, int], np.ndarray], shape: tuple[int, int]) -> np.ndarray:
         key = (shape[1], shape[0])
         buffer = cache.get(key)
@@ -95,14 +103,10 @@ class PortalRenderer:
         local_frame = frame[y0:y1, x0:x1]
 
         mask = self._organic_mask((local_h, local_w), local_center, width, height, angle_rad, t)
-        content = self._prepare_content(
-            dimension, width, height, angle_rad, local_center, local_w, local_h
-        )
+        content = self._prepare_content(dimension, width, height, angle_rad, local_center, local_w, local_h)
 
-        # Keep alpha in float32 from the normalization step onward. The previous
-        # uint8 destination caused invalid quantization and the TV-static artifact.
         alpha = self._float_buffer(self._alpha_float_cache, mask.shape)
-        cv2.normalize(mask, alpha, 1.0, 0.0, cv2.NORM_MINMAX, dtype=cv2.CV_32F)
+        alpha[:] = mask.astype(np.float32) * (1.0 / 255.0)
         alpha *= intensity
 
         local_output = self._buffer(self._canvas_cache, local_frame.shape)
