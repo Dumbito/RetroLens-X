@@ -2,7 +2,7 @@ import time
 
 import cv2
 
-from src.camera.camera import Camera
+from src.camera.camera import Camera, CameraConfig
 from src.vision.hand_tracker import HandTracker
 from src.gestures.gesture_engine import GestureEngine
 from src.portal.portal_engine import PortalEngine
@@ -31,7 +31,7 @@ def draw_hand_rig(frame, hand):
 
 
 def main():
-    camera = Camera()
+    camera = Camera(CameraConfig(threaded=True))
     tracker = HandTracker("assets/models/hand_landmarker.task")
     gestures = GestureEngine()
     portal = PortalEngine()
