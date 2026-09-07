@@ -2,7 +2,7 @@ import math
 
 import numpy as np
 
-from src.dimensions.procedural import ProceduralDimension
+from src.dimensions import MultiverseDimension, ProceduralDimension
 from src.gestures.gesture_engine import GestureEngine
 from src.portal.portal_engine import PortalEngine
 from src.portal.portal_renderer import PortalRenderer
@@ -31,13 +31,13 @@ def test_gesture_engine_accepts_empty_frame():
     assert GestureEngine().detect([], 1000) == []
 
 
-def test_portal_engine_geometry_is_bounded():
-    engine = PortalEngine(min_width=140, max_width=900)
+def test_portal_engine_uses_index_fingertips():
+    engine = PortalEngine(min_width=120, max_width=900, aspect_ratio=0.58)
     state = engine.update([_open_hand(-0.12), _open_hand(0.12)])
     assert state.active
-    assert 140 <= state.width <= 900
-    assert state.height == round(state.width * 0.72)
-    assert math.isfinite(state.angle)
+    assert 120 <= state.width <= 900
+    assert state.height == round(state.width * 0.58)
+    assert state.angle == 0.0
 
 
 def test_portal_engine_rejects_malformed_hands():
@@ -61,23 +61,35 @@ def test_procedural_dimension_reuses_grid():
     assert dimension._nx is first
 
 
+def test_multiverse_dimension_shape_and_difference():
+    frame = np.full((180, 320, 3), 128, dtype=np.uint8)
+    dimension = MultiverseDimension(work_scale=0.6)
+    image = dimension.render(frame, 140, 90, (160, 90), 1000)
+    assert image.shape == (90, 140, 3)
+    assert image.dtype == np.uint8
+    assert np.any(image != 128)
+
+
 def test_portal_renderer_preserves_frame_shape():
     frame = np.zeros((180, 320, 3), dtype=np.uint8)
-    dimension = ProceduralDimension(work_scale=0.5).render(140, 100, 1000)
-    result = PortalRenderer().render(frame, dimension, (160, 90), 140, 100, 25.0, 1000)
+    dimension = np.full((100, 140, 3), 128, dtype=np.uint8)
+    result = PortalRenderer().render(frame, dimension, (160, 90), 140, 100, 0.0, 1000)
     assert result.shape == frame.shape
     assert result.dtype == np.uint8
-
-
-def test_portal_renderer_accepts_degree_angles():
-    frame = np.zeros((180, 320, 3), dtype=np.uint8)
-    dimension = np.full((100, 140, 3), 128, dtype=np.uint8)
-    result = PortalRenderer().render(frame, dimension, (160, 90), 140, 100, 90.0, 1000)
     assert np.any(result != frame)
+
+
+def test_portal_renderer_is_rectangular_and_bounded():
+    frame = np.zeros((180, 320, 3), dtype=np.uint8)
+    dimension = np.full((80, 120, 3), 128, dtype=np.uint8)
+    result = PortalRenderer().render(frame, dimension, (160, 90), 140, 100, 0.0, 1000)
+    assert result[90, 160, 0] > 0
+    assert np.all(result[10, 10] == 0)
+    assert math.isfinite(float(result.mean()))
 
 
 def test_portal_renderer_clips_to_frame_edges():
     frame = np.zeros((120, 160, 3), dtype=np.uint8)
     dimension = np.full((80, 120, 3), 128, dtype=np.uint8)
-    result = PortalRenderer().render(frame, dimension, (2, 2), 140, 100, 45.0, 1000)
+    result = PortalRenderer().render(frame, dimension, (2, 2), 140, 100, 0.0, 1000)
     assert result.shape == frame.shape
