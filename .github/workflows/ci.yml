@@ -19,4 +19,4 @@ jobs:
       - name: Compile
         run: python -m compileall -q src tests
       - name: Unit tests
-        run: pytest -q tests/test_core_components.py
+        run: pytest -q tests/test_core_components.py tests/test_runtime_architecture.py
