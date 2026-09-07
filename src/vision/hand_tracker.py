@@ -26,13 +26,17 @@ class HandTracker:
         min_detection_confidence: float = 0.5,
         min_hand_presence_confidence: float = 0.5,
         min_tracking_confidence: float = 0.5,
+        input_scale: float = 0.75,
     ):
         self.model_path = Path(model_path)
         if not self.model_path.is_file():
             raise FileNotFoundError(f"No se encontró el modelo: {self.model_path}")
         if num_hands < 1:
             raise ValueError("num_hands debe ser >= 1")
+        if not 0.25 <= input_scale <= 1.0:
+            raise ValueError("input_scale debe estar entre 0.25 y 1.0")
 
+        self.input_scale = float(input_scale)
         base_options = BaseOptions(model_asset_path=str(self.model_path))
         options = vision.HandLandmarkerOptions(
             base_options=base_options,
@@ -53,6 +57,11 @@ class HandTracker:
         self._last_timestamp_ms = timestamp_ms
 
         height, width = frame.shape[:2]
+        if self.input_scale < 0.999:
+            input_width = max(1, int(round(width * self.input_scale)))
+            input_height = max(1, int(round(height * self.input_scale)))
+            frame = cv2.resize(frame, (input_width, input_height), interpolation=cv2.INTER_AREA)
+
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
         result = self.landmarker.detect_for_video(mp_image, timestamp_ms)
