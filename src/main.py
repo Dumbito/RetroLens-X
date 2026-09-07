@@ -9,6 +9,8 @@ from src.gestures.gesture_engine import GestureEngine
 from src.portal.portal_engine import PortalEngine
 from src.portal.portal_renderer import PortalRenderer
 from src.portal.spatial_fold import SpatialFoldEngine
+from src.portal.portal_physics import PortalPhysics
+from src.vfx.background_fx import BackgroundFX
 from src.dimensions import MultiverseDimension
 
 
@@ -35,8 +37,7 @@ def draw_hand_rig(frame, hand):
 def fingertip_distance(hands):
     if len(hands) < 2:
         return None
-    first = hands[0].pixel_landmarks
-    second = hands[1].pixel_landmarks
+    first, second = hands[0].pixel_landmarks, hands[1].pixel_landmarks
     if len(first) <= 8 or len(second) <= 8:
         return None
     return math.hypot(second[8][0] - first[8][0], second[8][1] - first[8][1])
@@ -53,12 +54,23 @@ def hand_scale(hands):
     return sum(values) / len(values) if values else None
 
 
+def hand_points(hands):
+    result = []
+    for hand in hands[:2]:
+        points = hand.pixel_landmarks
+        if len(points) > 8:
+            result.append(points[8])
+    return tuple(result)
+
+
 def main():
     camera = Camera(CameraConfig(threaded=True))
     tracker = HandTracker("assets/models/hand_landmarker.task")
     gestures = GestureEngine()
     portal = PortalEngine(min_width=120, max_width=900, aspect_ratio=0.58, smoothing=0.24)
     fold = SpatialFoldEngine(strength=0.34, falloff=1.35, margin=40, work_scale=0.70)
+    physics = PortalPhysics()
+    background = BackgroundFX(work_scale=0.55, margin=125)
     renderer = PortalRenderer()
     dimension = MultiverseDimension(work_scale=0.60)
     show_hand_rig = False
@@ -68,6 +80,7 @@ def main():
     lost_since = None
     last_time = time.monotonic()
     previous_portal_center = None
+    previous_distance = None
 
     ARM_RATIO = 0.72
     OPEN_RATIO = 1.05
@@ -77,6 +90,7 @@ def main():
 
     armed_since = None
     armed_distance = None
+    opening_ratio = 0.0
 
     try:
         while True:
@@ -95,6 +109,7 @@ def main():
 
             distance = fingertip_distance(hands)
             scale = hand_scale(hands)
+            current_hand_points = hand_points(hands)
 
             if distance is not None and scale is not None:
                 arm_distance = scale * ARM_RATIO
@@ -120,7 +135,10 @@ def main():
                         lost_since = None
                         portal.reset()
                         portal.update(hands, timestamp_ms)
+                        physics.reset()
+                        physics.trigger_open()
                         previous_portal_center = portal.state.center
+                        previous_distance = distance
                     elif distance > arm_distance * 1.65:
                         phase = "READY"
                         armed_since = None
@@ -131,9 +149,11 @@ def main():
                         phase = "READY"
                         lost_since = None
                         portal.reset()
+                        physics.reset()
                         armed_since = None
                         armed_distance = None
                         previous_portal_center = None
+                        previous_distance = None
                     else:
                         portal.update(hands, timestamp_ms)
                         lost_since = None
@@ -147,11 +167,32 @@ def main():
                     armed_since = None
                     armed_distance = None
                     previous_portal_center = None
+                    previous_distance = None
                     portal.reset()
+                    physics.reset()
             else:
                 phase = "READY"
                 armed_since = None
                 armed_distance = None
+
+            if phase == "OPEN":
+                state = portal.state
+                if previous_distance is None:
+                    previous_distance = distance or 0.0
+                # Normalized opening: 0 near closure, 1 at/above the normal open distance.
+                open_reference = max(scale * OPEN_RATIO if scale else 1.0, 1.0)
+                opening_ratio = max(0.0, min(1.35, (distance or open_reference) / open_reference))
+                physics_state = physics.update(
+                    hands,
+                    state.center,
+                    state.width,
+                    state.height,
+                    timestamp_ms,
+                    opening_ratio=opening_ratio,
+                )
+            else:
+                physics_state = physics.state
+                opening_ratio = 0.0
 
             target_intensity = 1.0 if phase == "OPEN" else 0.0
             smoothing = 1.0 - math.exp(-delta_time * 12.0)
@@ -165,14 +206,29 @@ def main():
                 view_x = float(max(-1.0, min(1.0, view_x)))
                 view_y = float(max(-1.0, min(1.0, view_y)))
 
-                motion = 0.0
+                motion = physics_state.speed
                 if previous_portal_center is not None and delta_time > 0.0:
                     motion_px_s = math.hypot(
                         state.center[0] - previous_portal_center[0],
                         state.center[1] - previous_portal_center[1],
                     ) / delta_time
-                    motion = min(1.0, motion_px_s / 900.0)
+                    motion = max(motion, min(1.0, motion_px_s / 900.0))
                 previous_portal_center = state.center
+
+                flash = physics.consume_flash()
+                frame = background.apply(
+                    frame,
+                    state.center,
+                    state.width,
+                    state.height,
+                    state.angle,
+                    portal_intensity,
+                    motion=motion,
+                    waves=physics.waves,
+                    hands=current_hand_points,
+                    flash=flash,
+                    timestamp_ms=timestamp_ms,
+                )
 
                 frame = fold.apply(
                     frame,
