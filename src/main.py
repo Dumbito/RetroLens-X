@@ -2,6 +2,7 @@ import math
 import time
 
 import cv2
+import numpy as np
 
 from src.camera.camera import Camera, CameraConfig
 from src.vision.hand_tracker import HandTracker
@@ -11,7 +12,8 @@ from src.portal.portal_renderer import PortalRenderer
 from src.portal.spatial_fold import SpatialFoldEngine
 from src.portal.portal_physics import PortalPhysics
 from src.vfx.background_fx import BackgroundFX
-from src.dimensions import MultiverseDimension
+from src.dimensions import MultiverseDimension, ProceduralDimension
+from src.dimensions.universe import DimensionalUniverse
 
 
 CONNECTIONS = [
@@ -63,6 +65,22 @@ def hand_points(hands):
     return tuple(result)
 
 
+def blend_dimensions(camera_dimension, universe_dimension, universe_weight):
+    weight = float(max(0.0, min(1.0, universe_weight)))
+    if camera_dimension.shape != universe_dimension.shape:
+        universe_dimension = cv2.resize(
+            universe_dimension,
+            (camera_dimension.shape[1], camera_dimension.shape[0]),
+            interpolation=cv2.INTER_LINEAR,
+        )
+    return np.clip(
+        camera_dimension.astype(np.float32) * (1.0 - weight)
+        + universe_dimension.astype(np.float32) * weight,
+        0,
+        255,
+    ).astype(np.uint8)
+
+
 def main():
     camera = Camera(CameraConfig(threaded=True))
     tracker = HandTracker("assets/models/hand_landmarker.task")
@@ -72,9 +90,15 @@ def main():
     physics = PortalPhysics()
     background = BackgroundFX(work_scale=0.55, margin=125)
     renderer = PortalRenderer()
-    dimension = MultiverseDimension(work_scale=0.60)
-    show_hand_rig = False
 
+    # Keep the existing camera/comic dimension, then layer a fully procedural
+    # cosmic world over it. This preserves recognizable camera motion while
+    # making the aperture feel like a genuine alternate reality.
+    camera_dimension = MultiverseDimension(work_scale=0.60)
+    comic_dimension = ProceduralDimension(work_scale=0.46, max_work_width=360, max_work_height=260)
+    universe = DimensionalUniverse(work_scale=0.42, max_width=420, max_height=300)
+
+    show_hand_rig = False
     portal_intensity = 0.0
     phase = "READY"
     lost_since = None
@@ -102,6 +126,7 @@ def main():
 
             hands = tracker.detect(frame, timestamp_ms)
             gestures.detect(hands, timestamp_ms)
+            current_hand_points = hand_points(hands)
 
             if show_hand_rig:
                 for hand in hands:
@@ -109,7 +134,6 @@ def main():
 
             distance = fingertip_distance(hands)
             scale = hand_scale(hands)
-            current_hand_points = hand_points(hands)
 
             if distance is not None and scale is not None:
                 arm_distance = scale * ARM_RATIO
@@ -136,7 +160,7 @@ def main():
                         portal.reset()
                         portal.update(hands, timestamp_ms)
                         physics.reset()
-                        physics.trigger_open()
+                        physics.trigger_open(portal.state.center)
                         previous_portal_center = portal.state.center
                         previous_distance = distance
                     elif distance > arm_distance * 1.65:
@@ -146,10 +170,10 @@ def main():
 
                 elif phase == "OPEN":
                     if distance <= close_distance:
+                        physics.trigger_close()
                         phase = "READY"
                         lost_since = None
                         portal.reset()
-                        physics.reset()
                         armed_since = None
                         armed_distance = None
                         previous_portal_center = None
@@ -177,9 +201,6 @@ def main():
 
             if phase == "OPEN":
                 state = portal.state
-                if previous_distance is None:
-                    previous_distance = distance or 0.0
-                # Normalized opening: 0 near closure, 1 at/above the normal open distance.
                 open_reference = max(scale * OPEN_RATIO if scale else 1.0, 1.0)
                 opening_ratio = max(0.0, min(1.35, (distance or open_reference) / open_reference))
                 physics_state = physics.update(
@@ -201,10 +222,8 @@ def main():
             if phase == "OPEN" and portal_intensity > 0.005:
                 state = portal.state
                 frame_h, frame_w = frame.shape[:2]
-                view_x = ((state.center[0] / max(frame_w - 1, 1)) - 0.5) * 2.0
-                view_y = ((state.center[1] / max(frame_h - 1, 1)) - 0.5) * 2.0
-                view_x = float(max(-1.0, min(1.0, view_x)))
-                view_y = float(max(-1.0, min(1.0, view_y)))
+                view_x = float(max(-1.0, min(1.0, ((state.center[0] / max(frame_w - 1, 1)) - 0.5) * 2.0)))
+                view_y = float(max(-1.0, min(1.0, ((state.center[1] / max(frame_h - 1, 1)) - 0.5) * 2.0)))
 
                 motion = physics_state.speed
                 if previous_portal_center is not None and delta_time > 0.0:
@@ -241,7 +260,7 @@ def main():
                     timestamp_ms=timestamp_ms,
                 )
 
-                portal_dimension = dimension.render(
+                camera_dimension_frame = camera_dimension.render(
                     frame,
                     state.width,
                     state.height,
@@ -251,9 +270,47 @@ def main():
                     view_y=view_y,
                     view_angle=state.angle,
                 )
+                comic = comic_dimension.render(
+                    state.width,
+                    state.height,
+                    timestamp_ms,
+                    view_x=view_x,
+                    view_y=view_y,
+                    view_angle=state.angle,
+                )
+                cosmos = universe.render(
+                    state.width,
+                    state.height,
+                    timestamp_ms,
+                    view_x=view_x,
+                    view_y=view_y,
+                    intensity=portal_intensity,
+                    turbulence=physics_state.turbulence,
+                )
+
+                # Stable portal: mostly cosmic world. Movement/stability lets
+                # the camera/comic layers leak through, creating dimensional
+                # parallax and a convincing unstable transition.
+                cosmic_weight = 0.72 + 0.10 * physics_state.stability
+                comic_weight = 0.16 + 0.06 * physics_state.turbulence
+                cosmic_weight = min(0.88, cosmic_weight + 0.05 * physics_state.pulse)
+                layered = blend_dimensions(camera_dimension_frame, comic, comic_weight)
+                layered = blend_dimensions(layered, cosmos, cosmic_weight)
+
+                # Pressure near closure darkens and compresses the world; high
+                # motion increases the feeling that reality is tearing apart.
+                pressure = physics_state.pressure
+                if pressure > 0.01 or physics_state.turbulence > 0.01:
+                    layered_f = layered.astype(np.float32)
+                    gain = 0.82 + 0.18 * (1.0 - pressure) + 0.08 * physics_state.pulse
+                    layered = np.clip(layered_f * gain, 0, 255).astype(np.uint8)
+
+                if physics.collapse > 0.01:
+                    layered = cv2.GaussianBlur(layered, (0, 0), 1.0 + 4.0 * physics.collapse)
+
                 frame = renderer.render(
                     frame,
-                    portal_dimension,
+                    layered,
                     state.center,
                     state.width,
                     state.height,
