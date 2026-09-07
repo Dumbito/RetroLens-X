@@ -34,6 +34,17 @@ class PortalRenderer:
         self.particle_size = rng.uniform(1.0, 3.0, count)
         self._theta_cache: dict[int, np.ndarray] = {}
         self._grid_cache: dict[tuple[int, int], tuple[np.ndarray, np.ndarray]] = {}
+        self._canvas_cache: dict[tuple[int, int], np.ndarray] = {}
+        self._energy_cache: dict[tuple[int, int], np.ndarray] = {}
+        self._rim_cache: dict[tuple[int, int], np.ndarray] = {}
+
+    def _buffer(self, cache: dict[tuple[int, int], np.ndarray], shape: tuple[int, int, int]) -> np.ndarray:
+        key = (shape[1], shape[0])
+        buffer = cache.get(key)
+        if buffer is None or buffer.shape != shape:
+            buffer = np.empty(shape, dtype=np.uint8)
+            cache[key] = buffer
+        return buffer
 
     def render(self, frame, dimension, center, width, height, angle, timestamp_ms):
         if width <= 0 or height <= 0 or frame.ndim != 3:
@@ -95,12 +106,14 @@ class PortalRenderer:
         glow = self._glow_from_edges(edges)
         self._add_glow(local_output, glow)
 
-        energy = np.zeros_like(local_output)
+        energy = self._buffer(self._energy_cache, local_output.shape)
+        energy.fill(0)
         self._draw_rings(energy, local_center, width, height, angle_rad, t)
         self._draw_particles(energy, local_center, width, height, angle_rad, t)
         local_output = cv2.addWeighted(local_output, 1.0, energy, 0.82, 0.0)
 
-        rim = np.zeros_like(local_output)
+        rim = self._buffer(self._rim_cache, local_output.shape)
+        rim.fill(0)
         self._draw_rim(rim, local_center, width, height, angle_rad, t)
         local_output = cv2.addWeighted(local_output, 1.0, rim, 0.95, 0.0)
 
@@ -124,8 +137,7 @@ class PortalRenderer:
                 image[:, :, channel], 1.0, glow, weight, 0.0
             )
 
-    @staticmethod
-    def _prepare_content(dimension, width, height, angle, center, local_w, local_h):
+    def _prepare_content(self, dimension, width, height, angle, center, local_w, local_h):
         target_w = max(1, int(round(float(width))))
         target_h = max(1, int(round(float(height))))
         if dimension.shape[1] != target_w or dimension.shape[0] != target_h:
@@ -158,7 +170,8 @@ class PortalRenderer:
                     borderMode=cv2.BORDER_REFLECT_101,
                 )
 
-        canvas = np.zeros((local_h, local_w, 3), dtype=np.uint8)
+        canvas = self._buffer(self._canvas_cache, (local_h, local_w, 3))
+        canvas.fill(0)
         cx, cy = center
         x0 = int(round(cx - target_w * 0.5))
         y0 = int(round(cy - target_h * 0.5))
@@ -244,7 +257,8 @@ class PortalRenderer:
         return np.column_stack((x * ca - y * sa + cx, x * sa + y * ca + cy)).astype(np.int32)
 
     def _draw_rings(self, image, center, width, height, angle, t):
-        base = np.zeros_like(image)
+        base = self._buffer(self._energy_cache, image.shape)
+        base.fill(0)
         for i in range(self.config.ring_count):
             pulse = 1.0 + 0.035 * math.sin(t * (2.0 + i * 0.55) + i)
             scale = (1.0 + (i - 1) * 0.045) * pulse
