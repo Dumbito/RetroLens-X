@@ -7,19 +7,9 @@ import numpy as np
 
 
 class SpatialFoldEngine:
-    """Apply a localized spatial-fold distortion around the portal.
+    """Apply a localized, animated spatial fold around the portal."""
 
-    The effect is intentionally ROI-based: only the neighborhood around the
-    portal is remapped, keeping the rest of the camera frame untouched.
-    """
-
-    def __init__(
-        self,
-        strength: float = 0.34,
-        falloff: float = 1.35,
-        margin: int = 34,
-        work_scale: float = 0.70,
-    ) -> None:
+    def __init__(self, strength=0.34, falloff=1.35, margin=40, work_scale=0.70):
         if strength < 0.0:
             raise ValueError("strength debe ser >= 0")
         if falloff <= 0.0:
@@ -32,9 +22,8 @@ class SpatialFoldEngine:
         self.falloff = float(falloff)
         self.margin = int(margin)
         self.work_scale = float(work_scale)
-        self._map_cache: dict[tuple, tuple[np.ndarray, np.ndarray, tuple[int, int, int, int]]] = {}
 
-    def apply(self, frame, center, width, height, angle=0.0, intensity=1.0, motion=0.0):
+    def apply(self, frame, center, width, height, angle=0.0, intensity=1.0, motion=0.0, timestamp_ms=0):
         if frame.ndim != 3 or width <= 0 or height <= 0:
             return frame
 
@@ -43,7 +32,7 @@ class SpatialFoldEngine:
             return frame
 
         strength = self.strength * intensity
-        strength *= 1.0 + min(0.45, max(0.0, float(motion)) * 0.35)
+        strength *= 1.0 + min(0.55, max(0.0, float(motion)) * 0.40)
         if strength <= 0.001:
             return frame
 
@@ -53,7 +42,6 @@ class SpatialFoldEngine:
         half_w = width * 0.5
         half_h = height * 0.5
 
-        # The distortion extends beyond the portal edge, but decays quickly.
         extra_x = int(abs(math.sin(math.radians(angle))) * half_h + self.margin)
         extra_y = int(abs(math.sin(math.radians(angle))) * half_w + self.margin)
         radius_x = int(half_w + extra_x)
@@ -81,32 +69,31 @@ class SpatialFoldEngine:
         dy = (sy - local_cy) / max(half_h * (sh / lh), 1.0)
         r = np.sqrt(dx * dx + dy * dy)
 
-        # Ring-shaped displacement: strongest close to the portal boundary,
-        # fading both toward the center and toward the outer neighborhood.
         ring = np.exp(-((r - 1.02) ** 2) * (self.falloff * 5.5))
         core = np.exp(-(r * r) * 1.7)
-        fold = ring * (0.72 + 0.28 * core)
+        wave = np.sin(r * 12.0 - timestamp_ms * 0.010) * 0.5 + 0.5
+        fold = ring * (0.62 + 0.24 * core + 0.14 * wave)
 
-        radial = strength * 16.0 * fold * np.clip(r, 0.0, 1.8)
+        radial = strength * (16.0 + 5.0 * wave) * fold * np.clip(r, 0.0, 1.8)
         ux = np.divide(dx, r + 1e-5)
         uy = np.divide(dy, r + 1e-5)
+        tangent = strength * (7.0 + 3.0 * wave) * fold
 
-        # Tangential component makes the fold feel like a sheet bending in 3D.
-        tangent = strength * 7.0 * fold
-        map_x = (sx - radial * ux - tangent * uy).astype(np.float32)
-        map_y = (sy - radial * uy + tangent * ux).astype(np.float32)
+        # A subtle angular shear gives the neighborhood a folded-sheet feel.
+        shear = strength * 3.5 * fold * np.sin(math.radians(angle))
+        map_x = sx - radial * ux - tangent * uy + shear * dy
+        map_y = sy - radial * uy + tangent * ux - shear * dx
 
-        warped = cv2.remap(small, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT101)
+        warped = cv2.remap(small, map_x.astype(np.float32), map_y.astype(np.float32), cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT101)
         if scale < 0.999:
             warped = cv2.resize(warped, (lw, lh), interpolation=cv2.INTER_LINEAR)
 
-        # Keep the fold localized with a soft elliptical falloff at the ROI edge.
         yy, xx = np.ogrid[:lh, :lw]
         edge_x = np.minimum(xx + 1, lw - xx) / max(lw * 0.18, 1.0)
         edge_y = np.minimum(yy + 1, lh - yy) / max(lh * 0.18, 1.0)
         edge_alpha = np.clip(np.minimum(edge_x, edge_y), 0.0, 1.0)
         edge_alpha = edge_alpha * edge_alpha * (3.0 - 2.0 * edge_alpha)
-        alpha = (0.82 * strength * edge_alpha)[..., None]
+        alpha = (0.78 * strength * edge_alpha)[..., None]
         local[:] = np.clip(local.astype(np.float32) * (1.0 - alpha) + warped.astype(np.float32) * alpha, 0, 255).astype(np.uint8)
         frame[y0:y1, x0:x1] = local
         return frame
