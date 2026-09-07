@@ -66,13 +66,18 @@ def main():
     lost_since = None
     last_time = time.monotonic()
 
-    # The gesture is deliberately simple: touch the two index fingertips,
-    # then separate them. The thresholds are relative to hand size so they
-    # work at different distances from the webcam.
-    ARM_RATIO = 0.55
-    OPEN_RATIO = 1.10
-    CLOSE_RATIO = 0.62
+    # Much more forgiving fingertip gesture:
+    # 1) bring index fingertips close together to arm,
+    # 2) separate them to open,
+    # 3) bring them close again to close.
+    ARM_RATIO = 0.72
+    OPEN_RATIO = 1.05
+    CLOSE_RATIO = 0.78
     LOST_GRACE_SECONDS = 0.60
+    ARM_HOLD_SECONDS = 0.08
+
+    armed_since = None
+    armed_distance = None
 
     try:
         while True:
@@ -99,34 +104,52 @@ def main():
 
                 if phase == "READY":
                     if distance <= arm_distance:
-                        phase = "ARMED"
-                        lost_since = None
+                        if armed_since is None:
+                            armed_since = now
+                            armed_distance = distance
+                        elif now - armed_since >= ARM_HOLD_SECONDS:
+                            phase = "ARMED"
+                            lost_since = None
+                    else:
+                        armed_since = None
+                        armed_distance = None
+
                 elif phase == "ARMED":
+                    armed_distance = distance
                     if distance >= open_distance:
                         phase = "OPEN"
                         lost_since = None
                         portal.reset()
                         portal.update(hands, timestamp_ms)
-                    elif distance > arm_distance * 1.35:
-                        # If the user backs out without opening, return to READY.
+                    elif distance > arm_distance * 1.65:
                         phase = "READY"
+                        armed_since = None
+                        armed_distance = None
+
                 elif phase == "OPEN":
                     if distance <= close_distance:
                         phase = "READY"
                         lost_since = None
                         portal.reset()
+                        armed_since = None
+                        armed_distance = None
                     else:
                         portal.update(hands, timestamp_ms)
                         lost_since = None
+
             elif phase == "OPEN":
                 if lost_since is None:
                     lost_since = now
                 elif now - lost_since >= LOST_GRACE_SECONDS:
                     phase = "READY"
                     lost_since = None
+                    armed_since = None
+                    armed_distance = None
                     portal.reset()
             else:
                 phase = "READY"
+                armed_since = None
+                armed_distance = None
 
             target_intensity = 1.0 if phase == "OPEN" else 0.0
             smoothing = 1.0 - math.exp(-delta_time * 12.0)
@@ -165,7 +188,7 @@ def main():
                 hint = "JUNTA LOS INDICES PARA CERRAR"
             elif phase == "ARMED":
                 status = "FRAME ARMED"
-                hint = "AHORA SEPARA LOS INDICES"
+                hint = "SEPARA LOS INDICES PARA ABRIR"
             else:
                 status = "FRAME READY"
                 hint = "JUNTA LAS PUNTAS DE LOS INDICES"
