@@ -4,16 +4,18 @@ import time
 import cv2
 import numpy as np
 
+from src.app.state_machine import PortalStateMachine
 from src.camera.camera import Camera, CameraConfig
-from src.vision.hand_tracker import HandTracker
-from src.gestures.gesture_engine import GestureEngine
-from src.portal.portal_engine import PortalEngine
-from src.portal.portal_renderer import PortalRenderer
-from src.portal.spatial_fold import SpatialFoldEngine
-from src.portal.portal_physics import PortalPhysics
-from src.vfx.background_fx import BackgroundFX
+from src.diagnostics.profiler import PipelineProfiler
 from src.dimensions import MultiverseDimension, ProceduralDimension
 from src.dimensions.universe import DimensionalUniverse
+from src.gestures.gesture_engine import GestureEngine
+from src.pipeline import CallableEffect, EffectPipeline, FrameContext
+from src.portal.portal_engine import PortalEngine
+from src.portal.portal_physics import PortalPhysics
+from src.portal.portal_renderer import PortalRenderer
+from src.portal.spatial_fold import SpatialFoldEngine
+from src.vfx.background_fx import BackgroundFX
 
 
 CONNECTIONS = [
@@ -57,28 +59,155 @@ def hand_scale(hands):
 
 
 def hand_points(hands):
-    result = []
-    for hand in hands[:2]:
-        points = hand.pixel_landmarks
-        if len(points) > 8:
-            result.append(points[8])
-    return tuple(result)
+    return tuple(hand.pixel_landmarks[8] for hand in hands[:2] if len(hand.pixel_landmarks) > 8)
 
 
-def blend_dimensions(camera_dimension, universe_dimension, universe_weight):
-    weight = float(max(0.0, min(1.0, universe_weight)))
-    if camera_dimension.shape != universe_dimension.shape:
-        universe_dimension = cv2.resize(
-            universe_dimension,
-            (camera_dimension.shape[1], camera_dimension.shape[0]),
-            interpolation=cv2.INTER_LINEAR,
-        )
+def blend_dimensions(base, overlay, weight):
+    weight = float(max(0.0, min(1.0, weight)))
+    if base.shape != overlay.shape:
+        overlay = cv2.resize(overlay, (base.shape[1], base.shape[0]), interpolation=cv2.INTER_LINEAR)
     return np.clip(
-        camera_dimension.astype(np.float32) * (1.0 - weight)
-        + universe_dimension.astype(np.float32) * weight,
+        base.astype(np.float32) * (1.0 - weight) + overlay.astype(np.float32) * weight,
         0,
         255,
     ).astype(np.uint8)
+
+
+def build_portal_pipeline(background, fold, renderer, camera_dimension, comic_dimension, universe):
+    """Create the ordered portal render graph.
+
+    The graph is deliberately backend-neutral: each stage receives a
+    FrameContext and can later be replaced by a GLSL/OpenGL implementation.
+    """
+
+    def environment(ctx):
+        if ctx.phase != "OPEN" or ctx.intensity <= 0.005:
+            return ctx
+        state = ctx.portal_state
+        physics = ctx.physics_state
+        flash = physics and ctx.metadata.get("flash", 0.0)
+        ctx.frame = background.apply(
+            ctx.frame,
+            state.center,
+            state.width,
+            state.height,
+            state.angle,
+            ctx.intensity,
+            motion=ctx.motion,
+            waves=physics and ctx.metadata.get("waves", ()),
+            hands=ctx.hand_points,
+            flash=flash,
+            timestamp_ms=ctx.timestamp_ms,
+        )
+        return ctx
+
+    def fold_stage(ctx):
+        if ctx.phase != "OPEN" or ctx.intensity <= 0.005:
+            return ctx
+        state = ctx.portal_state
+        ctx.frame = fold.apply(
+            ctx.frame,
+            state.center,
+            state.width,
+            state.height,
+            angle=state.angle,
+            intensity=ctx.intensity,
+            motion=ctx.motion,
+            timestamp_ms=ctx.timestamp_ms,
+        )
+        return ctx
+
+    def dimensions(ctx):
+        if ctx.phase != "OPEN" or ctx.intensity <= 0.005:
+            return ctx
+        state = ctx.portal_state
+        physics = ctx.physics_state
+        camera_layer = camera_dimension.render(
+            ctx.frame,
+            state.width,
+            state.height,
+            state.center,
+            ctx.timestamp_ms,
+            view_x=ctx.view_x,
+            view_y=ctx.view_y,
+            view_angle=state.angle,
+        )
+        comic = comic_dimension.render(
+            state.width,
+            state.height,
+            ctx.timestamp_ms,
+            view_x=ctx.view_x,
+            view_y=ctx.view_y,
+            view_angle=state.angle,
+        )
+        cosmos = universe.render(
+            state.width,
+            state.height,
+            ctx.timestamp_ms,
+            view_x=ctx.view_x,
+            view_y=ctx.view_y,
+            intensity=ctx.intensity,
+            turbulence=physics.turbulence,
+        )
+        cosmic_weight = min(0.88, 0.72 + 0.10 * physics.stability + 0.05 * physics.pulse)
+        comic_weight = 0.16 + 0.06 * physics.turbulence
+        layered = blend_dimensions(camera_layer, comic, comic_weight)
+        layered = blend_dimensions(layered, cosmos, cosmic_weight)
+        pressure = physics.pressure
+        gain = 0.82 + 0.18 * (1.0 - pressure) + 0.08 * physics.pulse
+        ctx.metadata["layered"] = np.clip(layered.astype(np.float32) * gain, 0, 255).astype(np.uint8)
+        return ctx
+
+    def final_composite(ctx):
+        if ctx.phase != "OPEN" or ctx.intensity <= 0.005:
+            return ctx
+        state = ctx.portal_state
+        physics = ctx.physics_state
+        layered = ctx.metadata["layered"]
+        if physics and physics.collapse > 0.01:
+            layered = cv2.GaussianBlur(layered, (0, 0), 1.0 + 4.0 * physics.collapse)
+        ctx.frame = renderer.render(
+            ctx.frame,
+            layered,
+            state.center,
+            state.width,
+            state.height,
+            state.angle,
+            ctx.timestamp_ms,
+            ctx.intensity,
+        )
+        return ctx
+
+    return EffectPipeline([
+        CallableEffect("background", environment),
+        CallableEffect("spatial_fold", fold_stage),
+        CallableEffect("dimensions", dimensions),
+        CallableEffect("portal_composite", final_composite),
+    ])
+
+
+def draw_hud(frame, phase, distance, scale, profiler, show_profiler):
+    if phase == "OPEN":
+        status, hint = "MULTIVERSE WINDOW", "JUNTA LOS INDICES PARA CERRAR"
+    elif phase == "ARMED":
+        status, hint = "FRAME ARMED", "SEPARA LOS INDICES PARA ABRIR"
+    else:
+        status, hint = "FRAME READY", "JUNTA LAS PUNTAS DE LOS INDICES"
+    cv2.putText(frame, status, (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+    cv2.putText(frame, hint, (20, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+    if distance is not None and scale is not None:
+        cv2.putText(frame, f"INDEX DIST: {distance:.0f} / HAND SCALE: {scale:.0f}", (20, 92), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    cv2.putText(frame, "H = HAND RIG | P = PROFILER | Q / ESC = EXIT", (20, 118), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
+    if show_profiler:
+        stats = profiler.summary()
+        text = f"FPS {stats['fps']:.1f} | FRAME {stats['frame_avg_ms']:.1f}ms | P95 {stats['frame_p95_ms']:.1f}ms"
+        cv2.putText(frame, text, (20, 145), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 1)
+        y = 168
+        for name in ("camera", "tracking", "pipeline"):
+            key = f"{name}_avg_ms"
+            if key in stats:
+                cv2.putText(frame, f"{name.upper():9s} {stats[key]:5.1f}ms", (20, y), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 255), 1)
+                y += 19
 
 
 def main():
@@ -86,47 +215,35 @@ def main():
     tracker = HandTracker("assets/models/hand_landmarker.task")
     gestures = GestureEngine()
     portal = PortalEngine(min_width=120, max_width=900, aspect_ratio=0.58, smoothing=0.24)
-    fold = SpatialFoldEngine(strength=0.34, falloff=1.35, margin=40, work_scale=0.70)
     physics = PortalPhysics()
     background = BackgroundFX(work_scale=0.55, margin=125)
+    fold = SpatialFoldEngine(strength=0.34, falloff=1.35, margin=40, work_scale=0.70)
     renderer = PortalRenderer()
-
-    # Keep the existing camera/comic dimension, then layer a fully procedural
-    # cosmic world over it. This preserves recognizable camera motion while
-    # making the aperture feel like a genuine alternate reality.
     camera_dimension = MultiverseDimension(work_scale=0.60)
     comic_dimension = ProceduralDimension(work_scale=0.46, max_work_width=360, max_work_height=260)
     universe = DimensionalUniverse(work_scale=0.42, max_width=420, max_height=300)
+    portal_pipeline = build_portal_pipeline(background, fold, renderer, camera_dimension, comic_dimension, universe)
+    lifecycle = PortalStateMachine()
+    profiler = PipelineProfiler()
 
     show_hand_rig = False
+    show_profiler = False
     portal_intensity = 0.0
-    phase = "READY"
-    lost_since = None
     last_time = time.monotonic()
-    previous_portal_center = None
-    previous_distance = None
-
-    ARM_RATIO = 0.72
-    OPEN_RATIO = 1.05
-    CLOSE_RATIO = 0.78
-    LOST_GRACE_SECONDS = 0.60
-    ARM_HOLD_SECONDS = 0.08
-
-    armed_since = None
-    armed_distance = None
-    opening_ratio = 0.0
+    previous_center = None
 
     try:
         while True:
+            profiler.begin_frame()
             frame = camera.read()
             now = time.monotonic()
             delta_time = min(max(now - last_time, 0.0), 0.1)
             last_time = now
             timestamp_ms = time.monotonic_ns() // 1_000_000
 
-            hands = tracker.detect(frame, timestamp_ms)
-            gestures.detect(hands, timestamp_ms)
-            current_hand_points = hand_points(hands)
+            with profiler.measure("tracking"):
+                hands = tracker.detect(frame, timestamp_ms)
+                gestures.detect(hands, timestamp_ms)
 
             if show_hand_rig:
                 for hand in hands:
@@ -134,214 +251,71 @@ def main():
 
             distance = fingertip_distance(hands)
             scale = hand_scale(hands)
+            old_phase = lifecycle.phase
+            lifecycle.update(hands, distance, scale, now, portal, physics, timestamp_ms)
+            if lifecycle.phase == "OPEN" and old_phase != "OPEN":
+                previous_center = portal.state.center
 
-            if distance is not None and scale is not None:
-                arm_distance = scale * ARM_RATIO
-                open_distance = scale * OPEN_RATIO
-                close_distance = scale * CLOSE_RATIO
-
-                if phase == "READY":
-                    if distance <= arm_distance:
-                        if armed_since is None:
-                            armed_since = now
-                            armed_distance = distance
-                        elif now - armed_since >= ARM_HOLD_SECONDS:
-                            phase = "ARMED"
-                            lost_since = None
-                    else:
-                        armed_since = None
-                        armed_distance = None
-
-                elif phase == "ARMED":
-                    armed_distance = distance
-                    if distance >= open_distance:
-                        phase = "OPEN"
-                        lost_since = None
-                        portal.reset()
-                        portal.update(hands, timestamp_ms)
-                        physics.reset()
-                        physics.trigger_open(portal.state.center)
-                        previous_portal_center = portal.state.center
-                        previous_distance = distance
-                    elif distance > arm_distance * 1.65:
-                        phase = "READY"
-                        armed_since = None
-                        armed_distance = None
-
-                elif phase == "OPEN":
-                    if distance <= close_distance:
-                        physics.trigger_close()
-                        phase = "READY"
-                        lost_since = None
-                        portal.reset()
-                        armed_since = None
-                        armed_distance = None
-                        previous_portal_center = None
-                        previous_distance = None
-                    else:
-                        portal.update(hands, timestamp_ms)
-                        lost_since = None
-
-            elif phase == "OPEN":
-                if lost_since is None:
-                    lost_since = now
-                elif now - lost_since >= LOST_GRACE_SECONDS:
-                    phase = "READY"
-                    lost_since = None
-                    armed_since = None
-                    armed_distance = None
-                    previous_portal_center = None
-                    previous_distance = None
-                    portal.reset()
-                    physics.reset()
-            else:
-                phase = "READY"
-                armed_since = None
-                armed_distance = None
-
-            if phase == "OPEN":
-                state = portal.state
-                open_reference = max(scale * OPEN_RATIO if scale else 1.0, 1.0)
-                opening_ratio = max(0.0, min(1.35, (distance or open_reference) / open_reference))
+            if lifecycle.phase == "OPEN" and distance is not None and scale is not None:
+                state = portal.update(hands, timestamp_ms)
+                open_reference = max(scale * lifecycle.open_ratio, 1.0)
+                opening_ratio = max(0.0, min(1.35, distance / open_reference))
                 physics_state = physics.update(
-                    hands,
-                    state.center,
-                    state.width,
-                    state.height,
-                    timestamp_ms,
-                    opening_ratio=opening_ratio,
+                    hands, state.center, state.width, state.height, timestamp_ms, opening_ratio=opening_ratio
                 )
+                motion = physics_state.speed
+                if previous_center is not None and delta_time > 0.0:
+                    px_s = math.hypot(state.center[0] - previous_center[0], state.center[1] - previous_center[1]) / delta_time
+                    motion = max(motion, min(1.0, px_s / 900.0))
+                previous_center = state.center
             else:
-                physics_state = physics.state
                 opening_ratio = 0.0
+                physics_state = physics.state
+                motion = physics_state.speed
+                if lifecycle.phase != "OPEN":
+                    previous_center = None
 
-            target_intensity = 1.0 if phase == "OPEN" else 0.0
+            target_intensity = 1.0 if lifecycle.phase == "OPEN" else 0.0
             smoothing = 1.0 - math.exp(-delta_time * 12.0)
             portal_intensity += (target_intensity - portal_intensity) * smoothing
 
-            if phase == "OPEN" and portal_intensity > 0.005:
+            ctx = FrameContext(
+                frame=frame,
+                timestamp_ms=timestamp_ms,
+                delta_time=delta_time,
+                hands=tuple(hands),
+                hand_points=hand_points(hands),
+                phase=lifecycle.phase,
+                distance=distance,
+                hand_scale=scale,
+                opening_ratio=opening_ratio,
+                intensity=portal_intensity,
+                motion=motion,
+            )
+            if lifecycle.phase == "OPEN":
                 state = portal.state
                 frame_h, frame_w = frame.shape[:2]
-                view_x = float(max(-1.0, min(1.0, ((state.center[0] / max(frame_w - 1, 1)) - 0.5) * 2.0)))
-                view_y = float(max(-1.0, min(1.0, ((state.center[1] / max(frame_h - 1, 1)) - 0.5) * 2.0)))
+                ctx.view_x = max(-1.0, min(1.0, ((state.center[0] / max(frame_w - 1, 1)) - 0.5) * 2.0))
+                ctx.view_y = max(-1.0, min(1.0, ((state.center[1] / max(frame_h - 1, 1)) - 0.5) * 2.0))
+                ctx.portal_state = state
+                ctx.physics_state = physics_state
+                ctx.metadata["waves"] = physics.waves
+                ctx.metadata["flash"] = physics.consume_flash()
 
-                motion = physics_state.speed
-                if previous_portal_center is not None and delta_time > 0.0:
-                    motion_px_s = math.hypot(
-                        state.center[0] - previous_portal_center[0],
-                        state.center[1] - previous_portal_center[1],
-                    ) / delta_time
-                    motion = max(motion, min(1.0, motion_px_s / 900.0))
-                previous_portal_center = state.center
-
-                flash = physics.consume_flash()
-                frame = background.apply(
-                    frame,
-                    state.center,
-                    state.width,
-                    state.height,
-                    state.angle,
-                    portal_intensity,
-                    motion=motion,
-                    waves=physics.waves,
-                    hands=current_hand_points,
-                    flash=flash,
-                    timestamp_ms=timestamp_ms,
-                )
-
-                frame = fold.apply(
-                    frame,
-                    state.center,
-                    state.width,
-                    state.height,
-                    angle=state.angle,
-                    intensity=portal_intensity,
-                    motion=motion,
-                    timestamp_ms=timestamp_ms,
-                )
-
-                camera_dimension_frame = camera_dimension.render(
-                    frame,
-                    state.width,
-                    state.height,
-                    state.center,
-                    timestamp_ms,
-                    view_x=view_x,
-                    view_y=view_y,
-                    view_angle=state.angle,
-                )
-                comic = comic_dimension.render(
-                    state.width,
-                    state.height,
-                    timestamp_ms,
-                    view_x=view_x,
-                    view_y=view_y,
-                    view_angle=state.angle,
-                )
-                cosmos = universe.render(
-                    state.width,
-                    state.height,
-                    timestamp_ms,
-                    view_x=view_x,
-                    view_y=view_y,
-                    intensity=portal_intensity,
-                    turbulence=physics_state.turbulence,
-                )
-
-                # Stable portal: mostly cosmic world. Movement/stability lets
-                # the camera/comic layers leak through, creating dimensional
-                # parallax and a convincing unstable transition.
-                cosmic_weight = 0.72 + 0.10 * physics_state.stability
-                comic_weight = 0.16 + 0.06 * physics_state.turbulence
-                cosmic_weight = min(0.88, cosmic_weight + 0.05 * physics_state.pulse)
-                layered = blend_dimensions(camera_dimension_frame, comic, comic_weight)
-                layered = blend_dimensions(layered, cosmos, cosmic_weight)
-
-                # Pressure near closure darkens and compresses the world; high
-                # motion increases the feeling that reality is tearing apart.
-                pressure = physics_state.pressure
-                if pressure > 0.01 or physics_state.turbulence > 0.01:
-                    layered_f = layered.astype(np.float32)
-                    gain = 0.82 + 0.18 * (1.0 - pressure) + 0.08 * physics_state.pulse
-                    layered = np.clip(layered_f * gain, 0, 255).astype(np.uint8)
-
-                if physics.collapse > 0.01:
-                    layered = cv2.GaussianBlur(layered, (0, 0), 1.0 + 4.0 * physics.collapse)
-
-                frame = renderer.render(
-                    frame,
-                    layered,
-                    state.center,
-                    state.width,
-                    state.height,
-                    state.angle,
-                    timestamp_ms,
-                    portal_intensity,
-                )
-
-            if phase == "OPEN":
-                status = "MULTIVERSE WINDOW"
-                hint = "JUNTA LOS INDICES PARA CERRAR"
-            elif phase == "ARMED":
-                status = "FRAME ARMED"
-                hint = "SEPARA LOS INDICES PARA ABRIR"
-            else:
-                status = "FRAME READY"
-                hint = "JUNTA LAS PUNTAS DE LOS INDICES"
-
-            cv2.putText(frame, status, (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-            cv2.putText(frame, hint, (20, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-            if distance is not None and scale is not None:
-                cv2.putText(frame, f"INDEX DIST: {distance:.0f} / HAND SCALE: {scale:.0f}", (20, 92), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-            cv2.putText(frame, "H = HAND RIG | Q / ESC = EXIT", (20, 118), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
+            with profiler.measure("pipeline"):
+                ctx = portal_pipeline.run(ctx)
+            frame = ctx.frame
+            draw_hud(frame, lifecycle.phase, distance, scale, profiler, show_profiler)
 
             cv2.imshow("RetroLens-X", frame)
+            profiler.end_frame()
             key = cv2.waitKey(1) & 0xFF
             if key == ord("h"):
                 show_hand_rig = not show_hand_rig
+            elif key == ord("p"):
+                show_profiler = not show_profiler
             elif key in (ord("q"), 27):
                 break
-
     finally:
         tracker.close()
         camera.release()
