@@ -63,7 +63,7 @@ class PortalRenderer:
         if width <= 0 or height <= 0 or frame.ndim != 3:
             return frame
 
-        intensity = min(max(float(intensity), 0.0), 1.0)
+        intensity = max(0.0, min(1.0, float(intensity)))
         if intensity <= 0.0:
             return frame
 
@@ -101,7 +101,9 @@ class PortalRenderer:
 
         alpha = self._single_buffer(self._alpha_cache, mask.shape)
         cv2.normalize(mask, alpha, 1.0 / 255.0, 0.0, cv2.NORM_MINMAX, dtype=cv2.CV_32F)
-        alpha *= intensity
+        if intensity < 0.999:
+            alpha *= intensity
+
         local_output = self._buffer(self._canvas_cache, local_frame.shape)
         np.multiply(local_frame, 1.0 - alpha[..., None], out=local_output, casting="unsafe")
         np.add(local_output, content * alpha[..., None], out=local_output, casting="unsafe")
@@ -109,27 +111,21 @@ class PortalRenderer:
 
         edges = cv2.Canny(mask, 70, 180)
         glow = self._glow_from_edges(edges)
-        if intensity < 0.999:
-            glow = np.multiply(glow, intensity).astype(np.uint8)
-        self._add_glow(local_output, glow)
+        self._add_glow(local_output, glow, intensity)
 
         energy = self._buffer(self._ring_cache, local_output.shape)
         energy.fill(0)
-        self._draw_rings(energy, local_center, width, height, angle_rad, t)
-        self._draw_particles(energy, local_center, width, height, angle_rad, t)
-        if intensity < 0.999:
-            energy[:] = np.multiply(energy, intensity).astype(np.uint8)
+        self._draw_rings(energy, local_center, width, height, angle_rad, t, intensity)
+        self._draw_particles(energy, local_center, width, height, angle_rad, t, intensity)
 
         blend = self._buffer(self._blend_cache, local_output.shape)
-        cv2.addWeighted(local_output, 1.0, energy, 0.82, 0.0, dst=blend)
+        cv2.addWeighted(local_output, 1.0, energy, 0.82 * intensity, 0.0, dst=blend)
         local_output, blend = blend, local_output
 
         rim = self._buffer(self._rim_cache, local_output.shape)
         rim.fill(0)
-        self._draw_rim(rim, local_center, width, height, angle_rad, t)
-        if intensity < 0.999:
-            rim[:] = np.multiply(rim, intensity).astype(np.uint8)
-        cv2.addWeighted(local_output, 1.0, rim, 0.95, 0.0, dst=blend)
+        self._draw_rim(rim, local_center, width, height, angle_rad, t, intensity)
+        cv2.addWeighted(local_output, 1.0, rim, 0.95 * intensity, 0.0, dst=blend)
         local_output = blend
 
         frame[y0:y1, x0:x1] = local_output
@@ -144,10 +140,11 @@ class PortalRenderer:
         return glow
 
     @staticmethod
-    def _add_glow(image, glow):
-        for channel, weight in enumerate((0.55, 0.41, 0.19)):
+    def _add_glow(image, glow, intensity=1.0):
+        weights = (0.55, 0.41, 0.19)
+        for channel, weight in enumerate(weights):
             image[:, :, channel] = cv2.addWeighted(
-                image[:, :, channel], 1.0, glow, weight, 0.0
+                image[:, :, channel], 1.0, glow, weight * intensity, 0.0
             )
 
     def _prepare_content(self, dimension, width, height, angle, center, local_w, local_h):
@@ -267,13 +264,16 @@ class PortalRenderer:
         sa = math.sin(angle)
         return np.column_stack((x * ca - y * sa + cx, x * sa + y * ca + cy)).astype(np.int32)
 
-    def _draw_rings(self, image, center, width, height, angle, t):
+    def _draw_rings(self, image, center, width, height, angle, t, intensity=1.0):
         base = image
         for i in range(self.config.ring_count):
             pulse = 1.0 + 0.035 * math.sin(t * (2.0 + i * 0.55) + i)
             scale = (1.0 + (i - 1) * 0.045) * pulse
             pts = self._ellipse_points(center, width, height, angle, t, i * 1.9, scale, 160)
-            cv2.polylines(base, [pts], True, (90, 170, 245), 2 if i == 1 else 1, cv2.LINE_AA)
+            thickness = 2 if i == 1 else 1
+            if intensity < 0.999:
+                thickness = max(1, int(round(thickness * (0.65 + 0.35 * intensity))))
+            cv2.polylines(base, [pts], True, (90, 170, 245), thickness, cv2.LINE_AA)
 
         arc_count = max(0, int(self.config.energy_arc_count))
         if arc_count:
@@ -302,13 +302,14 @@ class PortalRenderer:
 
         if self.config.ring_blur_sigma > 0:
             blur = cv2.GaussianBlur(base, (0, 0), self.config.ring_blur_sigma)
-            image[:] = cv2.addWeighted(image, 1.0, blur, 0.45, 0.0)
+            image[:] = cv2.addWeighted(image, 1.0, blur, 0.45 * intensity, 0.0)
 
-    def _draw_rim(self, image, center, width, height, angle, t):
+    def _draw_rim(self, image, center, width, height, angle, t, intensity=1.0):
         pts = self._ellipse_points(center, width, height, angle, t, 0.0, 1.0, 220)
-        cv2.polylines(image, [pts], True, (180, 225, 255), self.config.edge_thickness, cv2.LINE_AA)
+        thickness = max(1, int(round(self.config.edge_thickness * (0.55 + 0.45 * intensity))))
+        cv2.polylines(image, [pts], True, (180, 225, 255), thickness, cv2.LINE_AA)
 
-    def _draw_particles(self, image, center, width, height, angle, t):
+    def _draw_particles(self, image, center, width, height, angle, t, intensity=1.0):
         cx, cy = center
         ca = math.cos(angle)
         sa = math.sin(angle)
@@ -322,6 +323,7 @@ class PortalRenderer:
             x = int(cx + local_x * ca - local_y * sa)
             y = int(cy + local_x * sa + local_y * ca)
             if 0 <= x < image.shape[1] and 0 <= y < image.shape[0]:
-                size = max(1, int(self.particle_size[i]))
-                brightness = int(130 + 90 * (0.5 + 0.5 * math.sin(t * 5.0 + self.particle_phase[i])))
-                cv2.circle(image, (x, y), size, (brightness // 2, brightness, 255), -1)
+                size = max(1, int(self.particle_size[i] * (0.6 + 0.4 * intensity)))
+                brightness = int((130 + 90 * (0.5 + 0.5 * math.sin(t * 5.0 + self.particle_phase[i]))) * intensity)
+                if brightness > 0:
+                    cv2.circle(image, (x, y), size, (brightness // 2, brightness, 255), -1)
