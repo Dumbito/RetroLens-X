@@ -121,39 +121,50 @@ class PortalRenderer:
         else:
             resized = dimension
 
-        # Keep the content inside the same axis-aligned bounding box as the
-        # portal mask. At 90° the portal dimensions intentionally stay WxH:
-        # the visual rotates, but the mask geometry remains stable.
-        if abs(math.sin(angle)) < 1e-6:
+        # The source image is transformed within the same target rectangle as
+        # the portal. BORDER_REFLECT keeps the transformed dimension populated.
+        if abs(angle) < 1e-6:
             transformed = resized
         else:
-            matrix = cv2.getRotationMatrix2D(
-                ((target_w - 1) * 0.5, (target_h - 1) * 0.5),
-                -math.degrees(angle),
-                1.0,
-            )
-            transformed = cv2.warpAffine(
-                resized,
-                matrix,
-                (target_w, target_h),
-                flags=cv2.INTER_LINEAR,
-                borderMode=cv2.BORDER_REFLECT_101,
-            )
+            if abs(abs(angle) - math.pi * 0.5) < 1e-6:
+                k = 1 if angle > 0 else 3
+                transformed = np.rot90(resized, k=k).copy()
+                transformed = cv2.resize(
+                    transformed,
+                    (target_w, target_h),
+                    interpolation=cv2.INTER_LINEAR,
+                )
+            else:
+                matrix = cv2.getRotationMatrix2D(
+                    ((target_w - 1) * 0.5, (target_h - 1) * 0.5),
+                    -math.degrees(angle),
+                    1.0,
+                )
+                transformed = cv2.warpAffine(
+                    resized,
+                    matrix,
+                    (target_w, target_h),
+                    flags=cv2.INTER_LINEAR,
+                    borderMode=cv2.BORDER_REFLECT_101,
+                )
 
         canvas = np.zeros((local_h, local_w, 3), dtype=np.uint8)
         cx, cy = center
-        x = int(round(cx - target_w * 0.5))
-        y = int(round(cy - target_h * 0.5))
-        src_x0 = max(0, -x)
-        src_y0 = max(0, -y)
-        dst_x0 = max(0, x)
-        dst_y0 = max(0, y)
-        copy_w = min(target_w - src_x0, local_w - dst_x0)
-        copy_h = min(target_h - src_y0, local_h - dst_y0)
-        if copy_w > 0 and copy_h > 0:
-            canvas[dst_y0:dst_y0 + copy_h, dst_x0:dst_x0 + copy_w] = transformed[
-                src_y0:src_y0 + copy_h,
-                src_x0:src_x0 + copy_w,
+        x0 = int(round(cx - target_w * 0.5))
+        y0 = int(round(cy - target_h * 0.5))
+        x1 = x0 + target_w
+        y1 = y0 + target_h
+        dst_x0 = max(0, x0)
+        dst_y0 = max(0, y0)
+        dst_x1 = min(local_w, x1)
+        dst_y1 = min(local_h, y1)
+        src_x0 = dst_x0 - x0
+        src_y0 = dst_y0 - y0
+        src_x1 = src_x0 + max(0, dst_x1 - dst_x0)
+        src_y1 = src_y0 + max(0, dst_y1 - dst_y0)
+        if dst_x1 > dst_x0 and dst_y1 > dst_y0:
+            canvas[dst_y0:dst_y1, dst_x0:dst_x1] = transformed[
+                src_y0:src_y1, src_x0:src_x1
             ]
         return canvas
 
@@ -212,7 +223,7 @@ class PortalRenderer:
             cv2.polylines(layer, [pts], True, (90, 170, 245), 2 if i == 1 else 1, cv2.LINE_AA)
             if self.config.ring_blur_sigma > 0:
                 blur = cv2.GaussianBlur(layer, (0, 0), self.config.ring_blur_sigma)
-                image = cv2.addWeighted(image, 1.0, blur, 0.45, 0.0)
+                image[:] = cv2.addWeighted(image, 1.0, blur, 0.45, 0.0)
             image[:] = cv2.addWeighted(image, 1.0, layer, 0.75, 0.0)
 
     def _draw_rim(self, image, center, width, height, angle, t):
