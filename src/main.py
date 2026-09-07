@@ -90,8 +90,6 @@ def build_portal_pipeline(background, fold, renderer, camera_dimension, comic_di
         layered = blend_dimensions(layered, cosmos, min(0.78, 0.62 + 0.08 * physics.stability + 0.04 * physics.pulse))
         layered = blend_dimensions(layered, scene, portal_scene.config.opacity)
         if video is not None:
-            # The uploaded Blade Runner 2049 scene sits behind the portal VFX,
-            # intentionally semi-transparent so the dimensional layers remain visible.
             video_weight = min(0.78, video_layer.opacity * (0.78 + 0.22 * ctx.intensity))
             video_weight *= 0.92 - 0.12 * physics.pressure
             layered = blend_dimensions(layered, video, video_weight)
