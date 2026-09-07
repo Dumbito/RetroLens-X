@@ -12,25 +12,24 @@ class PortalVisualConfig:
     edge_thickness: int = 5
     glow_sigma: float = 15.0
     roi_margin: int = 52
-    feather: int = 6
+    feather: int = 7
     chromatic_offset: int = 6
     glitch_strength: float = 1.0
     glow_scale: float = 0.46
-    depth_rings: int = 7
-    energy_particles: int = 28
-    shape_points: int = 64
+    depth_rings: int = 8
+    energy_particles: int = 34
+    shape_points: int = 72
 
 
 class PortalRenderer:
-    """Render a cinematic organic dimensional aperture instead of a rigid rectangle."""
+    """Cinematic organic dimensional aperture with a strictly clipped interior."""
 
     def __init__(self, config: PortalVisualConfig | None = None) -> None:
         self.config = config or PortalVisualConfig()
         self._mask_cache: dict[tuple, np.ndarray] = {}
         self._output_cache: dict[tuple[int, int], np.ndarray] = {}
         self._border_cache: dict[tuple[int, int], np.ndarray] = {}
-        count = max(28, int(self.config.energy_particles))
-        self._seed = np.random.default_rng(7319).random((count, 4), dtype=np.float32)
+        self._seed = np.random.default_rng(7319).random((max(34, self.config.energy_particles), 4), dtype=np.float32)
 
     @staticmethod
     def _buffer(cache, shape):
@@ -51,19 +50,18 @@ class PortalRenderer:
         return p @ np.array([[c, -s], [s, c]], np.float32).T + np.array([cx, cy], np.float32)
 
     @staticmethod
-    def _organic_points(center, width, height, angle, t, count=64, scale=1.0):
+    def _organic_points(center, width, height, angle, t, count=72, scale=1.0, deformation=1.0):
         cx, cy = float(center[0]), float(center[1])
         rx, ry = width * 0.5 * scale, height * 0.5 * scale
-        n = max(32, int(count))
+        n = max(40, int(count))
         theta = np.linspace(0.0, math.tau, n, endpoint=False, dtype=np.float32)
-        wobble = (
-            1.0
-            + 0.045 * np.sin(theta * 3.0 + t * 1.7)
-            + 0.028 * np.sin(theta * 5.0 - t * 1.13)
-            + 0.018 * np.sin(theta * 7.0 + t * 0.77)
+        wobble = 1.0 + deformation * (
+            0.055 * np.sin(theta * 3.0 + t * 1.7)
+            + 0.032 * np.sin(theta * 5.0 - t * 1.13)
+            + 0.022 * np.sin(theta * 7.0 + t * 0.77)
+            + 0.012 * np.sin(theta * 11.0 - t * 1.91)
         )
-        x = np.cos(theta) * rx * wobble
-        y = np.sin(theta) * ry * wobble
+        x, y = np.cos(theta) * rx * wobble, np.sin(theta) * ry * wobble
         r = math.radians(float(angle))
         c, s = math.cos(r), math.sin(r)
         return np.column_stack((x * c - y * s + cx, x * s + y * c + cy)).astype(np.float32)
@@ -79,7 +77,8 @@ class PortalRenderer:
         cx, cy = int(round(center[0])), int(round(center[1]))
         angle = max(-25.0, min(25.0, float(angle)))
         t = timestamp_ms * 0.001
-        outer_global = self._organic_points((cx, cy), width, height, angle, t, self.config.shape_points)
+        pulse = 1.0 + 0.018 * math.sin(t * 5.0)
+        outer_global = self._organic_points((cx, cy), width * pulse, height * pulse, angle, t, self.config.shape_points, 1.0, 1.0)
         margin = max(int(self.config.roi_margin), int(self.config.glow_sigma * 2.5))
         x0 = max(0, int(math.floor(outer_global[:, 0].min())) - margin)
         y0 = max(0, int(math.floor(outer_global[:, 1].min())) - margin)
@@ -112,10 +111,15 @@ class PortalRenderer:
         alpha = (mask.astype(np.float32) / 255.0 * intensity)[:, :, None]
         output[:] = np.clip(output.astype(np.float32) * (1.0 - alpha) + warped.astype(np.float32) * alpha, 0, 255).astype(np.uint8)
 
+        # Everything below this point is an interior effect. Clip it back to the
+        # organic aperture afterwards so no tunnel/glitch line can leak outside.
+        interior_base = output.copy()
         self._dimensional_tunnel(output, local_center, width, height, angle, t, intensity)
         self._energy_field(output, local_center, width, height, angle, t, intensity)
         self._particle_field(output, local_center, width, height, angle, t, intensity)
-        self._signal_artifacts(output, local_center, width, height, t, intensity)
+        self._signal_artifacts(output, local_center, width, height, angle, t, intensity)
+        self._core_lensing(output, local_center, width, height, angle, t, intensity)
+        self._clip_interior(output, interior_base, mask)
 
         border = self._buffer(self._border_cache, (local.shape[0], local.shape[1]))
         border.fill(0)
@@ -139,27 +143,40 @@ class PortalRenderer:
         self._mask_cache[key] = mask
         return mask
 
+    @staticmethod
+    def _clip_interior(image, base, mask):
+        alpha = (mask.astype(np.float32) / 255.0)[:, :, None]
+        image[:] = np.clip(base.astype(np.float32) * (1.0 - alpha) + image.astype(np.float32) * alpha, 0, 255).astype(np.uint8)
+
     def _dimensional_tunnel(self, image, center, width, height, angle, t, intensity):
-        for i in range(max(2, int(self.config.depth_rings))):
-            scale = 0.92 - i * 0.105
+        """Nested organic membranes and short rays create depth without long stray lines."""
+        rings = max(3, int(self.config.depth_rings))
+        for i in range(rings):
+            scale = 0.91 - i * 0.085
             if scale < 0.30:
                 break
-            c = (center[0] + math.sin(t * (1.0 + i * 0.17) + i * 1.9) * 1.8 * intensity, center[1] + math.cos(t * 0.8 + i) * 1.8 * intensity)
-            pts = self._organic_points(c, width, height, angle, t + i * 0.12, self.config.shape_points, scale)
-            value = int(45 + 62 * intensity * (1.0 - i / max(self.config.depth_rings, 1)))
+            drift = 1.8 * intensity * math.sin(t * (1.0 + i * 0.16) + i * 1.7)
+            c = (center[0] + drift, center[1] + 1.6 * intensity * math.cos(t * 0.8 + i))
+            pts = self._organic_points(c, width, height, angle, t + i * 0.13, self.config.shape_points, scale, 1.0 + i * 0.025)
+            value = int(42 + 65 * intensity * (1.0 - i / rings))
             cv2.polylines(image, [np.round(pts).astype(np.int32)], True, value, 1 if i else 2, cv2.LINE_AA)
-            if i == 0:
-                inner = self._organic_points(c, width, height, angle, t + 0.2, self.config.shape_points, 0.56)
-                for j in range(0, len(pts), max(1, len(pts) // 8)):
-                    cv2.line(image, tuple(np.round(pts[j]).astype(int)), tuple(np.round(inner[j]).astype(int)), int(38 + 48 * intensity), 1, cv2.LINE_AA)
+
+            # Short perspective spokes only; no corner-to-corner straight beams.
+            if i in (0, 2, 4):
+                inner = self._organic_points(c, width, height, angle, t + 0.2, self.config.shape_points, max(0.34, scale - 0.15))
+                step = max(1, len(pts) // 8)
+                for j in range(0, len(pts), step):
+                    end = pts[j] * 0.58 + inner[j] * 0.42
+                    cv2.line(image, tuple(np.round(pts[j]).astype(int)), tuple(np.round(end).astype(int)), int(38 + 42 * intensity), 1, cv2.LINE_AA)
 
     def _energy_field(self, image, center, width, height, angle, t, intensity):
-        outer = self._organic_points(center, width * 1.03, height * 1.03, angle, t, self.config.shape_points)
+        """Broken energy fragments hug the contour instead of shooting away from it."""
+        outer = self._organic_points(center, width * 1.015, height * 1.015, angle, t, self.config.shape_points, 1.0, 1.0)
         n = len(outer)
-        for i in range(max(8, self.config.energy_particles // 2)):
-            start = int((t * (8.0 + i * 0.35) + i * 23.0) % n)
-            length = int(n * (0.018 + 0.022 * ((math.sin(t * 1.4 + i) + 1.0) * 0.5)))
-            idx = [(start + j) % n for j in range(max(2, length))]
+        for i in range(max(10, self.config.energy_particles // 2)):
+            start = int((t * (7.0 + i * 0.31) + i * 23.0) % n)
+            length = max(2, int(n * (0.012 + 0.018 * ((math.sin(t * 1.4 + i) + 1.0) * 0.5))))
+            idx = [(start + j) % n for j in range(length)]
             cv2.polylines(image, [np.round(outer[idx]).astype(np.int32)], False, int(145 + 90 * intensity), 1, cv2.LINE_AA)
 
     def _particle_field(self, image, center, width, height, angle, t, intensity):
@@ -170,40 +187,67 @@ class PortalRenderer:
             u = (float(p[0]) + t * (0.018 + (i % 5) * 0.002)) % 1.0
             v = (float(p[1]) + t * (0.014 + (i % 7) * 0.0015)) % 1.0
             depth = 0.55 + 0.45 * ((math.sin(t * (0.7 + p[2]) + i) + 1.0) * 0.5)
-            x, y = (u - 0.5) * width * (0.70 + depth * 0.50), (v - 0.5) * height * (0.70 + depth * 0.50)
+            x = (u - 0.5) * width * (0.68 + depth * 0.48)
+            y = (v - 0.5) * height * (0.68 + depth * 0.48)
             px, py = int(cx + x * c - y * s), int(cy + x * s + y * c)
             if 0 <= px < image.shape[1] and 0 <= py < image.shape[0]:
                 cv2.circle(image, (px, py), 1 if p[3] < 0.84 else 2, int(95 + 145 * intensity), -1, cv2.LINE_AA)
 
-    def _signal_artifacts(self, image, center, width, height, t, intensity):
+    def _signal_artifacts(self, image, center, width, height, angle, t, intensity):
+        """Localized glitch bands are kept short and oriented with the portal."""
         cx, cy = center
         h, w = image.shape[:2]
-        for i in range(5):
-            y = int(cy + ((t * 42 * (0.5 + i * 0.12) + i * height * 0.31) % max(height, 1)) - height * 0.5)
-            if 0 <= y < h:
-                x0, x1 = max(0, int(cx - width * 0.45)), min(w - 1, int(cx + width * 0.45))
-                cv2.line(image, (x0, y), (x1, y), int(20 + 65 * intensity), 1 + int(intensity), cv2.LINE_AA)
+        r = math.radians(angle)
+        c, s = math.cos(r), math.sin(r)
+        for i in range(7):
+            local_y = ((t * 38.0 * (0.55 + i * 0.09) + i * height * 0.27) % max(height, 1)) - height * 0.5
+            local_x = math.sin(t * 1.7 + i * 2.1) * width * 0.18
+            span = width * (0.12 + 0.025 * (i % 4))
+            x0, x1 = local_x - span, local_x + span
+            y = local_y
+            p0 = (cx + x0 * c - y * s, cy + x0 * s + y * c)
+            p1 = (cx + x1 * c - y * s, cy + x1 * s + y * c)
+            if (0 <= p0[0] < w or 0 <= p1[0] < w) and (0 <= p0[1] < h or 0 <= p1[1] < h):
+                cv2.line(image, tuple(np.round(p0).astype(int)), tuple(np.round(p1).astype(int)), int(20 + 65 * intensity), 1 + int(intensity), cv2.LINE_AA)
         for i in range(3):
-            y = int(cy + math.sin(t * 2.0 + i * 2.4) * height * 0.32)
-            if 0 <= y < h:
-                span = int(width * (0.07 + i * 0.035))
-                x0, x1 = max(0, int(cx - span)), min(w - 1, int(cx + span))
-                if x1 > x0:
-                    row = image[y:y + 1, x0:x1 + 1]
-                    row[:] = np.roll(row, (-1 if i % 2 else 1) * max(1, int(self.config.chromatic_offset * intensity)), axis=1)
+            local_y = math.sin(t * 2.0 + i * 2.4) * height * 0.28
+            span = width * (0.06 + i * 0.025)
+            for shift in (-1, 1):
+                a = (-span, local_y + shift * 2.0)
+                b = (span, local_y + shift * 2.0)
+                p0 = (cx + a[0] * c - a[1] * s, cy + a[0] * s + a[1] * c)
+                p1 = (cx + b[0] * c - b[1] * s, cy + b[0] * s + b[1] * c)
+                cv2.line(image, tuple(np.round(p0).astype(int)), tuple(np.round(p1).astype(int)), int(28 + 55 * intensity), 1, cv2.LINE_AA)
+
+    def _core_lensing(self, image, center, width, height, angle, t, intensity):
+        """A pulsing inner lens makes the aperture feel hollow rather than flat."""
+        cx, cy = center
+        pulse = 0.42 + 0.08 * math.sin(t * 4.2)
+        pts = self._organic_points(center, width, height, angle, t * 0.8, self.config.shape_points, pulse, 0.7)
+        cv2.polylines(image, [np.round(pts).astype(np.int32)], True, int(55 + 75 * intensity), 1, cv2.LINE_AA)
+        inner = self._organic_points(center, width, height, angle, -t * 0.55, self.config.shape_points, pulse * 0.72, 0.5)
+        cv2.polylines(image, [np.round(inner).astype(np.int32)], True, int(35 + 55 * intensity), 1, cv2.LINE_AA)
 
     @staticmethod
     def _draw_border(image, points, t, intensity):
         pts = np.round(points).astype(np.int32)
-        cv2.polylines(image, [pts], True, 255, max(1, int(round(5 * (0.7 + 0.3 * intensity)))), cv2.LINE_AA)
-        for shift, value in [(-5, 120), (5, 205)]:
+        cv2.polylines(image, [pts], True, 255, max(1, int(round(5 * (0.72 + 0.28 * intensity)))), cv2.LINE_AA)
+        # Chromatic contour is generated from the same closed path, never as loose lines.
+        for shift, value in [(-4, 120), (4, 205)]:
             cv2.polylines(image, [pts + np.array([shift, 0], np.int32)], True, value, 1, cv2.LINE_AA)
         n = len(points)
-        for i in range(14):
-            a = int((t * (7.0 + i * 0.2) + i * 17.0) % n)
-            length = max(2, int(n * (0.012 + 0.025 * ((math.sin(t + i) + 1.0) * 0.5))))
+        for i in range(18):
+            a = int((t * (6.0 + i * 0.19) + i * 17.0) % n)
+            length = max(2, int(n * (0.010 + 0.020 * ((math.sin(t * 1.2 + i) + 1.0) * 0.5))))
             idx = [(a + j) % n for j in range(length)]
             cv2.polylines(image, [pts[idx]], False, 255, 1, cv2.LINE_AA)
+
+        # Small dimensional sparks stay attached to the contour.
+        for i in range(10):
+            a = int((i / 10.0) * n + math.sin(t * 2.0 + i) * 2.0) % n
+            p = points[a]
+            q = points[(a + max(2, n // 80)) % n]
+            cv2.line(image, tuple(np.round(p).astype(int)), tuple(np.round(q).astype(int)), 255, 2, cv2.LINE_AA)
 
     def _glow_from_border(self, border):
         scale = min(max(float(self.config.glow_scale), 0.35), 1.0)
