@@ -7,13 +7,14 @@ import numpy as np
 class ProceduralDimension:
     """Animated procedural dimension with layered depth/parallax."""
 
-    def __init__(self, work_scale: float = 0.5):
+    def __init__(self, work_scale: float = 0.5, max_work_width: int = 360, max_work_height: int = 260):
         self.work_scale = float(np.clip(work_scale, 0.25, 1.0))
+        self.max_work_width = max(64, int(max_work_width))
+        self.max_work_height = max(48, int(max_work_height))
         self._grid_shape: tuple[int, int] | None = None
         self._nx: np.ndarray | None = None
         self._ny: np.ndarray | None = None
         self._radial: np.ndarray | None = None
-        self._angle: np.ndarray | None = None
         self._result: np.ndarray | None = None
         self._energy: np.ndarray | None = None
         self._local_r: np.ndarray | None = None
@@ -43,7 +44,6 @@ class ProceduralDimension:
         self._nx = nx
         self._ny = ny
         self._radial = np.sqrt(dx * dx + dy * dy, dtype=np.float32)
-        self._angle = np.arctan2(dy, dx, dtype=np.float32)
         self._result = np.empty((work_height, work_width, 3), dtype=np.uint8)
         self._energy = np.empty((work_height, work_width), dtype=np.float32)
         self._local_r = np.empty_like(nx)
@@ -71,14 +71,20 @@ class ProceduralDimension:
     ) -> np.ndarray:
         width = max(1, int(width))
         height = max(1, int(height))
-        work_width = max(1, int(round(width * self.work_scale)))
-        work_height = max(1, int(round(height * self.work_scale)))
+
+        # Keep the simulation resolution bounded and independent from portal size.
+        # Large portals therefore do not make the procedural simulation more expensive.
+        requested_width = max(1, int(round(width * self.work_scale)))
+        requested_height = max(1, int(round(height * self.work_scale)))
+        work_width = min(requested_width, self.max_work_width)
+        work_height = min(requested_height, self.max_work_height)
+        work_width = max(1, work_width)
+        work_height = max(1, work_height)
 
         self._ensure_grid(work_width, work_height)
         nx = self._nx
         ny = self._ny
         radial = self._radial
-        base_angle = self._angle
         result = self._result
         energy = self._energy
         local_r = self._local_r
@@ -94,7 +100,7 @@ class ProceduralDimension:
         rings = self._rings
         filaments = self._filaments
         assert all(x is not None for x in (
-            nx, ny, radial, base_angle, result, energy, local_r, local_a,
+            nx, ny, radial, result, energy, local_r, local_a,
             core, edge_falloff, px, py, wave_a, wave_b, wave_c, wave_d,
             rings, filaments,
         ))
@@ -104,7 +110,6 @@ class ProceduralDimension:
         vy = float(np.clip(view_y, -1.0, 1.0))
         va = float(view_angle)
 
-        # Reuse preallocated buffers to avoid per-frame temporary arrays.
         np.multiply(radial, 0.12, out=px)
         np.add(px, 0.055, out=px)
         np.multiply(px, vx, out=px)
@@ -115,15 +120,13 @@ class ProceduralDimension:
         np.multiply(py, vy, out=py)
         np.add(ny, py, out=py)
 
-        dx = local_r
-        dy = local_a
-        np.subtract(px, 0.5, out=dx)
-        np.subtract(py, 0.5, out=dy)
-        np.multiply(dx, dx, out=local_r)
-        np.multiply(dy, dy, out=local_a)
-        np.add(local_r, local_a, out=local_r)
+        np.subtract(px, 0.5, out=local_r)
+        np.subtract(py, 0.5, out=local_a)
+        np.multiply(local_r, local_r, out=rings)
+        np.multiply(local_a, local_a, out=filaments)
+        np.add(rings, filaments, out=local_r)
         np.sqrt(local_r, out=local_r)
-        np.arctan2(dy, dx, out=local_a)
+        np.arctan2(py - 0.5, px - 0.5, out=local_a)
         local_a += va * 0.22
 
         np.sin(px * 15.0 + t * 1.8, out=wave_a)
@@ -138,7 +141,6 @@ class ProceduralDimension:
         energy += 1.0
         energy *= 0.5
 
-        # Animated depth rings.
         np.multiply(local_r, 8.5, out=rings)
         rings -= t * 0.75
         rings += local_a * 0.18
@@ -161,7 +163,6 @@ class ProceduralDimension:
         np.clip(energy, 0.0, 1.0, out=energy)
         energy *= edge_falloff
 
-        # Fine moving filaments.
         np.multiply(local_a, 13.0, out=filaments)
         filaments += local_r * 42.0 - t * 4.0
         np.sin(filaments, out=filaments)
@@ -172,7 +173,6 @@ class ProceduralDimension:
         energy += filaments
         np.clip(energy, 0.0, 1.0, out=energy)
 
-        # BGR palette.
         np.multiply(energy, 205.0, out=wave_a)
         result[:, :, 0] = wave_a.astype(np.uint8)
         np.sqrt(energy, out=wave_b)
@@ -183,7 +183,6 @@ class ProceduralDimension:
         np.clip(wave_c, 0.0, 255.0, out=wave_c)
         result[:, :, 2] = wave_c.astype(np.uint8)
 
-        # Central hotspot.
         wave_d[:] = result[:, :, 1]
         wave_d += core * 22.0
         np.clip(wave_d, 0.0, 255.0, out=wave_d)
