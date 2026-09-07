@@ -109,13 +109,22 @@ class PortalRenderer:
 
     def _glow_from_edges(self, edges):
         sigma = max(float(self.config.glow_sigma), 0.5)
+        if self.config.glow_scale < 0.999:
+            scale = min(max(float(self.config.glow_scale), 0.25), 1.0)
+            small_w = max(1, int(round(edges.shape[1] * scale)))
+            small_h = max(1, int(round(edges.shape[0] * scale)))
+            small = cv2.resize(edges, (small_w, small_h), interpolation=cv2.INTER_AREA)
+            radius = max(1, int(round(sigma * scale * 1.5)))
+            blurred = cv2.blur(small, (radius * 2 + 1, radius * 2 + 1))
+            return cv2.resize(
+                blurred,
+                (edges.shape[1], edges.shape[0]),
+                interpolation=cv2.INTER_LINEAR,
+            )
+
         radius = max(1, int(round(sigma * 1.5)))
         kernel = radius * 2 + 1
-        blurred = cv2.blur(edges, (kernel, kernel))
-        # A box-filter approximation is intentionally used here: unlike a
-        # large Gaussian kernel it is O(N) in the kernel width and keeps the
-        # glow bounded to the existing ROI.
-        return blurred
+        return cv2.blur(edges, (kernel, kernel))
 
     @staticmethod
     def _add_glow(image, glow):
