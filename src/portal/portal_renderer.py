@@ -64,8 +64,6 @@ class PortalRenderer:
         t = timestamp_ms * 0.001
         local_frame = frame[y0:y1, x0:x1]
 
-        # The mask is generated in the rotated local ROI. This keeps the expensive
-        # per-pixel work bounded while still supporting arbitrary portal angles.
         mask = self._organic_mask(
             (local_h, local_w),
             local_center,
@@ -122,40 +120,48 @@ class PortalRenderer:
         else:
             resized = cv2.resize(dimension, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
 
-        if abs(math.sin(angle)) < 1e-6:
-            canvas = np.zeros((local_h, local_w, 3), dtype=np.uint8)
-            x = max(0, (local_w - target_w) // 2)
-            y = max(0, (local_h - target_h) // 2)
-            x2 = min(local_w, x + target_w)
-            y2 = min(local_h, y + target_h)
-            if x2 > x and y2 > y:
-                canvas[y:y2, x:x2] = resized[: y2 - y, : x2 - x]
-            return canvas
+        # Rotate into a canvas large enough to contain the complete dimension.
+        # Rotating a non-square image into its original WxH canvas would crop it
+        # at 90 degrees and can leave the portal mask with no usable content.
+        sin_a = abs(math.sin(angle))
+        cos_a = abs(math.cos(angle))
+        rotated_w = max(1, int(math.ceil(target_w * cos_a + target_h * sin_a)))
+        rotated_h = max(1, int(math.ceil(target_w * sin_a + target_h * cos_a)))
 
-        # The content itself is rotated along with the portal. Using the exact
-        # same inverse rotation as the mask keeps the dimension centered for
-        # 90-degree and arbitrary-angle portals.
-        rotation_matrix = cv2.getRotationMatrix2D(
-            ((target_w - 1) * 0.5, (target_h - 1) * 0.5),
-            -math.degrees(angle),
-            1.0,
-        )
-        rotated = cv2.warpAffine(
-            resized,
-            rotation_matrix,
-            (target_w, target_h),
-            flags=cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=(0, 0, 0),
-        )
+        if abs(angle) < 1e-6:
+            rotated = resized
+        else:
+            source_center = ((target_w - 1) * 0.5, (target_h - 1) * 0.5)
+            rotation_matrix = cv2.getRotationMatrix2D(
+                source_center,
+                -math.degrees(angle),
+                1.0,
+            )
+            rotation_matrix[0, 2] += (rotated_w - target_w) * 0.5
+            rotation_matrix[1, 2] += (rotated_h - target_h) * 0.5
+            rotated = cv2.warpAffine(
+                resized,
+                rotation_matrix,
+                (rotated_w, rotated_h),
+                flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=(0, 0, 0),
+            )
 
         canvas = np.zeros((local_h, local_w, 3), dtype=np.uint8)
-        x = max(0, (local_w - rotated.shape[1]) // 2)
-        y = max(0, (local_h - rotated.shape[0]) // 2)
-        x2 = min(local_w, x + rotated.shape[1])
-        y2 = min(local_h, y + rotated.shape[0])
-        if x2 > x and y2 > y:
-            canvas[y:y2, x:x2] = rotated[: y2 - y, : x2 - x]
+        x = (local_w - rotated.shape[1]) // 2
+        y = (local_h - rotated.shape[0]) // 2
+        src_x0 = max(0, -x)
+        src_y0 = max(0, -y)
+        dst_x0 = max(0, x)
+        dst_y0 = max(0, y)
+        copy_w = min(rotated.shape[1] - src_x0, local_w - dst_x0)
+        copy_h = min(rotated.shape[0] - src_y0, local_h - dst_y0)
+        if copy_w > 0 and copy_h > 0:
+            canvas[dst_y0:dst_y0 + copy_h, dst_x0:dst_x0 + copy_w] = rotated[
+                src_y0:src_y0 + copy_h,
+                src_x0:src_x0 + copy_w,
+            ]
         return canvas
 
     def _organic_mask(self, shape, center, width, height, angle, t):
