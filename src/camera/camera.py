@@ -92,7 +92,7 @@ class Camera:
         with self._frame_lock:
             if self._latest_frame is None:
                 raise RuntimeError("La cámara no entregó un frame válido.")
-            return self._latest_frame.copy()
+            return self._latest_frame
 
     def release(self):
         self._running = False
