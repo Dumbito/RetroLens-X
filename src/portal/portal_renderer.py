@@ -141,26 +141,6 @@ class PortalRenderer:
         else:
             resized = dimension
 
-        if abs(angle) < 1e-6:
-            transformed = resized
-        elif abs(abs(angle) - math.pi * 0.5) < 1e-6:
-            k = 1 if angle > 0 else 3
-            transformed = np.rot90(resized, k=k).copy()
-            transformed = cv2.resize(transformed, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
-        else:
-            matrix = cv2.getRotationMatrix2D(
-                ((target_w - 1) * 0.5, (target_h - 1) * 0.5),
-                -math.degrees(angle),
-                1.0,
-            )
-            transformed = cv2.warpAffine(
-                resized,
-                matrix,
-                (target_w, target_h),
-                flags=cv2.INTER_LINEAR,
-                borderMode=cv2.BORDER_REFLECT_101,
-            )
-
         key = (local_w, local_h)
         canvas = self._content_cache.get(key)
         if canvas is None or canvas.shape != (local_h, local_w, 3):
@@ -181,8 +161,30 @@ class PortalRenderer:
         src_y0 = dst_y0 - y0
         src_x1 = src_x0 + max(0, dst_x1 - dst_x0)
         src_y1 = src_y0 + max(0, dst_y1 - dst_y0)
-        if dst_x1 > dst_x0 and dst_y1 > dst_y0:
-            canvas[dst_y0:dst_y1, dst_x0:dst_x1] = transformed[src_y0:src_y1, src_x0:src_x1]
+        if dst_x1 <= dst_x0 or dst_y1 <= dst_y0:
+            return canvas
+
+        if abs(angle) < 1e-6:
+            transformed = resized
+        elif abs(abs(angle) - math.pi * 0.5) < 1e-6:
+            k = 1 if angle > 0 else 3
+            transformed = np.rot90(resized, k=k).copy()
+            transformed = cv2.resize(transformed, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+        else:
+            matrix = cv2.getRotationMatrix2D(
+                ((target_w - 1) * 0.5, (target_h - 1) * 0.5),
+                -math.degrees(angle),
+                1.0,
+            )
+            transformed = cv2.warpAffine(
+                resized,
+                matrix,
+                (target_w, target_h),
+                flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_REFLECT_101,
+            )
+
+        canvas[dst_y0:dst_y1, dst_x0:dst_x1] = transformed[src_y0:src_y1, src_x0:src_x1]
         return canvas
 
     def _organic_mask(self, shape, center, width, height, angle, t):
