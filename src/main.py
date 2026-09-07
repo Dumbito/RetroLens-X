@@ -17,6 +17,7 @@ from src.portal.portal_renderer import PortalRenderer
 from src.portal.spatial_fold import SpatialFoldEngine
 from src.vfx.background_fx import BackgroundFX
 from src.vfx.portal_scene import Portal3DScene
+from src.vision.hand_tracker import HandTracker
 
 CONNECTIONS = [(0,1),(1,2),(2,3),(3,4),(0,5),(5,6),(6,7),(7,8),(5,9),(9,10),(10,11),(11,12),(9,13),(13,14),(14,15),(15,16),(13,17),(17,18),(18,19),(19,20),(0,17)]
 
@@ -95,7 +96,7 @@ def build_portal_pipeline(background, fold, renderer, camera_dimension, comic_di
             return ctx
         state, physics = ctx.portal_state, ctx.physics_state
         layered = ctx.metadata["layered"]
-        if physics and physics.collapse > 0.01:
+        if physics and getattr(physics, "collapse", 0.0) > 0.01:
             layered = cv2.GaussianBlur(layered, (0, 0), 1.0 + 4.0 * physics.collapse)
         ctx.frame = renderer.render(ctx.frame, layered, state.center, state.width, state.height, state.angle, ctx.timestamp_ms, ctx.intensity, motion=ctx.motion)
         return ctx
