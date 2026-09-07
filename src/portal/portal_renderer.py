@@ -18,10 +18,11 @@ class PortalVisualConfig:
     ring_blur_sigma: float = 2.5
     mask_scale: float = 0.5
     glow_scale: float = 0.5
+    energy_arc_count: int = 4
 
 
 class PortalRenderer:
-    """Render portal content and VFX inside a bounded region of interest."""
+    """Render portal content and bounded cinematic VFX."""
 
     def __init__(self, config: PortalVisualConfig | None = None) -> None:
         self.config = config or PortalVisualConfig()
@@ -262,6 +263,34 @@ class PortalRenderer:
             scale = (1.0 + (i - 1) * 0.045) * pulse
             pts = self._ellipse_points(center, width, height, angle, t, i * 1.9, scale, 160)
             cv2.polylines(base, [pts], True, (90, 170, 245), 2 if i == 1 else 1, cv2.LINE_AA)
+
+        arc_count = max(0, int(self.config.energy_arc_count))
+        if arc_count:
+            rect = (
+                int(round(center[0] - width * 0.5)),
+                int(round(center[1] - height * 0.5)),
+                int(round(center[0] + width * 0.5)),
+                int(round(center[1] + height * 0.5)),
+            )
+            center_point = (int(round(center[0])), int(round(center[1])))
+            rotation = math.degrees(angle)
+            for i in range(arc_count):
+                phase = t * (55.0 + i * 11.0) + i * 83.0
+                start = phase % 360.0
+                span = 48.0 + 10.0 * math.sin(t * 2.0 + i)
+                thickness = 2 if i % 2 == 0 else 1
+                cv2.ellipse(
+                    base,
+                    center_point,
+                    (max(1, int(width * (0.42 + i * 0.035))), max(1, int(height * (0.42 + i * 0.035)))),
+                    rotation,
+                    start,
+                    start + span,
+                    (120, 205, 255),
+                    thickness,
+                    cv2.LINE_AA,
+                )
+
         if self.config.ring_blur_sigma > 0:
             blur = cv2.GaussianBlur(base, (0, 0), self.config.ring_blur_sigma)
             image[:] = cv2.addWeighted(image, 1.0, blur, 0.45, 0.0)
