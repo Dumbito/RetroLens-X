@@ -87,5 +87,9 @@ class MultiverseDimension:
         yy = np.arange(work_h, dtype=np.int32)[:, None]
         scan = ((yy + int(timestamp_ms * 0.04)) % 6 < 1).astype(np.uint8) * 18
         self._scanlines[:] = np.broadcast_to(scan, (work_h, work_w))
-        self._output[:] = cv2.subtract(self._output, self._scanlines[:, :, None])
+        for channel_index in range(3):
+            self._output[:, :, channel_index] = cv2.subtract(
+                self._output[:, :, channel_index], self._scanlines
+            )
+
         return cv2.resize(self._output, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
