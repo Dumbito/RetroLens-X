@@ -6,3 +6,24 @@ __pycache__/
 *.egg-info/
 .DS_Store
 assets/models/*.task
+
+# Backups locales
+*.bak
+*.backup
+*.preopt-backup
+*.preopt2-backup
+*.v050-backup
+*.v051-backup
+*.v052-backup
+*.v053-backup
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Entornos locales
+.venv/
+venv/
+
+# Modelos descargados
+assets/models/*.task

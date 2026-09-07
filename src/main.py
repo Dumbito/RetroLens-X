@@ -1,118 +1,92 @@
-from dataclasses import dataclass
-from pathlib import Path
-
+import time
 import cv2
-import mediapipe as mp
-from mediapipe.tasks.python import vision
-from mediapipe.tasks.python.core.base_options import BaseOptions
+
+from src.camera.camera import Camera
+from src.vision.hand_tracker import HandTracker
+from src.gestures.gesture_engine import GestureEngine, GestureType
+from src.portal.portal_engine import PortalEngine
+from src.portal.portal_renderer import PortalRenderer
+from src.dimensions import ProceduralDimension
+
+CONNECTIONS = [
+(0, 1), (1, 2), (2, 3), (3, 4),
+(0, 5), (5, 6), (6, 7), (7, 8),
+(5, 9), (9, 10), (10, 11), (11, 12),
+(9, 13), (13, 14), (14, 15), (15, 16),
+(13, 17), (17, 18), (18, 19), (19, 20),
+(0, 17)]
 
 
-@dataclass
-class Hand:
-    """Representa una mano detectada."""
+def draw_hand_rig(frame, hand):
+    points = hand.pixel_landmarks
 
-    landmarks: list
-    handedness: str
-    score: float
+    for start, end in CONNECTIONS:
+        cv2.line(frame, points[start], points[end], (255, 180, 0), 2)
+
+    for point in points:
+        cv2.circle(frame, point, 5, (0, 255, 255), -1)
+
+    x1, y1, x2, y2 = hand.bbox
+    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
 
-class HandTracker:
-    """Detector de manos basado en MediaPipe HandLandmarker."""
+def main():
+    camera = Camera()
+    tracker = HandTracker("assets/models/hand_landmarker.task")
+    gestures = GestureEngine()
+    portal = PortalEngine()
+    renderer = PortalRenderer()
+    dimension = ProceduralDimension()
 
-    def __init__(
-        self,
-        model_path: str | Path,
-        num_hands: int = 2,
-        min_detection_confidence: float = 0.5,
-        min_hand_presence_confidence: float = 0.5,
-        min_tracking_confidence: float = 0.5,
-    ):
-        self.model_path = Path(model_path)
+    try:
+        while True:
+            frame = camera.read()
+            timestamp_ms = time.monotonic_ns() // 1_000_000
 
-        if not self.model_path.exists():
-            raise FileNotFoundError(
-                f"No se encontró el modelo: {self.model_path}"
-            )
+            hands = tracker.detect(frame, timestamp_ms)
+            detected = gestures.detect(hands, timestamp_ms)
 
-        base_options = BaseOptions(
-            model_asset_path=str(self.model_path)
-        )
+            for hand in hands:
+                draw_hand_rig(frame, hand)
 
-        options = vision.HandLandmarkerOptions(
-            base_options=base_options,
-            running_mode=vision.RunningMode.VIDEO,
-            num_hands=num_hands,
-            min_hand_detection_confidence=min_detection_confidence,
-            min_hand_presence_confidence=min_hand_presence_confidence,
-            min_tracking_confidence=min_tracking_confidence,
-        )
+            open_hand_indices = [
+                gesture.hand_index
+                for gesture in detected
+                if gesture.type == GestureType.OPEN_HAND
+            ]
+            open_hands = [
+                hands[index]
+                for index in open_hand_indices
+                if 0 <= index < len(hands)
+            ]
 
-        self.landmarker = vision.HandLandmarker.create_from_options(
-            options
-        )
+            if len(open_hands) >= 2:
+                portal.update(open_hands[:2], timestamp_ms)
+            else:
+                portal.state.active = False
 
-    def detect(self, frame, timestamp_ms: int) -> list[Hand]:
-        """
-        Detecta manos en un frame de OpenCV.
+            if portal.state.active:
+                h, w = frame.shape[:2]
+                portal_dimension = dimension.render(w, h, timestamp_ms)
+                state = portal.state
+                frame = renderer.render(frame, portal_dimension, state.center, state.width, state.height, state.angle, timestamp_ms)
 
-        Args:
-            frame: Frame BGR procedente de OpenCV.
-            timestamp_ms: Timestamp monotónico en milisegundos.
+            status = "PORTAL ACTIVE" if portal.state.active else "PORTAL STANDBY"
+            cv2.putText(frame, status, (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+            cv2.putText(frame, "2 OPEN HANDS = OPEN PORTAL", (20, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+            cv2.putText(frame, "Q / ESC = EXIT", (20, 92), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
 
-        Returns:
-            Lista de objetos Hand.
-        """
+            cv2.imshow("RetroLens-X", frame)
 
-        rgb_frame = cv2.cvtColor(
-            frame,
-            cv2.COLOR_BGR2RGB,
-        )
+            key = cv2.waitKey(1) & 0xFF
+            if key in (ord("q"), 27):
+                break
 
-        mp_image = mp.Image(
-            image_format=mp.ImageFormat.SRGB,
-            data=rgb_frame,
-        )
+    finally:
+        tracker.close()
+        camera.release()
+        cv2.destroyAllWindows()
 
-        result = self.landmarker.detect_for_video(
-            mp_image,
-            timestamp_ms,
-        )
 
-        hands = []
-
-        if not result.hand_landmarks:
-            return hands
-
-        for index, landmarks in enumerate(result.hand_landmarks):
-            handedness = "Unknown"
-            score = 0.0
-
-            if (
-                result.handedness
-                and index < len(result.handedness)
-                and result.handedness[index]
-            ):
-                category = result.handedness[index][0]
-
-                handedness = category.category_name
-                score = category.score
-
-            hands.append(
-                Hand(
-                    landmarks=landmarks,
-                    handedness=handedness,
-                    score=score,
-                )
-            )
-
-        return hands
-
-    def close(self):
-        """Libera los recursos de MediaPipe."""
-        self.landmarker.close()
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        self.close()
+if __name__ == "__main__":
+    main()
