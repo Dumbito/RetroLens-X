@@ -41,6 +41,7 @@ class PortalRenderer:
         self._rim_cache: dict[tuple[int, int], np.ndarray] = {}
         self._glow_cache: dict[tuple[int, int], np.ndarray] = {}
         self._alpha_cache: dict[tuple[int, int], np.ndarray] = {}
+        self._alpha_float_cache: dict[tuple[int, int], np.ndarray] = {}
         self._blend_cache: dict[tuple[int, int], np.ndarray] = {}
 
     def _buffer(self, cache: dict[tuple[int, int], np.ndarray], shape: tuple[int, int, int]) -> np.ndarray:
@@ -56,6 +57,14 @@ class PortalRenderer:
         buffer = cache.get(key)
         if buffer is None or buffer.shape != shape:
             buffer = np.empty(shape, dtype=np.uint8)
+            cache[key] = buffer
+        return buffer
+
+    def _float_buffer(self, cache: dict[tuple[int, int], np.ndarray], shape: tuple[int, int]) -> np.ndarray:
+        key = (shape[1], shape[0])
+        buffer = cache.get(key)
+        if buffer is None or buffer.shape != shape:
+            buffer = np.empty(shape, dtype=np.float32)
             cache[key] = buffer
         return buffer
 
@@ -99,8 +108,10 @@ class PortalRenderer:
             dimension, width, height, angle_rad, local_center, local_w, local_h
         )
 
-        alpha = self._single_buffer(self._alpha_cache, mask.shape)
-        cv2.normalize(mask, alpha, 1.0 / 255.0, 0.0, cv2.NORM_MINMAX, dtype=cv2.CV_32F)
+        alpha_u8 = self._single_buffer(self._alpha_cache, mask.shape)
+        cv2.normalize(mask, alpha_u8, 1.0 / 255.0, 0.0, cv2.NORM_MINMAX, dtype=cv2.CV_32F)
+        alpha = self._float_buffer(self._alpha_float_cache, mask.shape)
+        alpha[:] = alpha_u8.astype(np.float32)
         if intensity < 0.999:
             alpha *= intensity
 
@@ -323,7 +334,7 @@ class PortalRenderer:
             x = int(cx + local_x * ca - local_y * sa)
             y = int(cy + local_x * sa + local_y * ca)
             if 0 <= x < image.shape[1] and 0 <= y < image.shape[0]:
-                size = max(1, int(self.particle_size[i] * (0.6 + 0.4 * intensity)))
-                brightness = int((130 + 90 * (0.5 + 0.5 * math.sin(t * 5.0 + self.particle_phase[i]))) * intensity)
-                if brightness > 0:
-                    cv2.circle(image, (x, y), size, (brightness // 2, brightness, 255), -1)
+                size = max(1, int(self.particle_size[i] * (0.55 + 0.45 * intensity)))
+                brightness = int(130 + 90 * (0.5 + 0.5 * math.sin(t * 5.0 + self.particle_phase[i])))
+                brightness = int(brightness * (0.35 + 0.65 * intensity))
+                cv2.circle(image, (x, y), size, (brightness // 2, brightness, 255), -1)
