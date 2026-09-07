@@ -73,7 +73,6 @@ class ProceduralDimension:
         height = max(1, int(height))
 
         # Keep the simulation resolution bounded and independent from portal size.
-        # Large portals therefore do not make the procedural simulation more expensive.
         requested_width = max(1, int(round(width * self.work_scale)))
         requested_height = max(1, int(round(height * self.work_scale)))
         work_width = min(requested_width, self.max_work_width)
@@ -108,7 +107,10 @@ class ProceduralDimension:
         t = timestamp_ms * 0.001
         vx = float(np.clip(view_x, -1.0, 1.0))
         vy = float(np.clip(view_y, -1.0, 1.0))
-        va = float(view_angle)
+        # Portal rotation is rendered by PortalRenderer. Avoid rotating the
+        # procedural texture here as well, which would duplicate a full-frame
+        # transform every frame while the hands are moving.
+        va = 0.0
 
         np.multiply(radial, 0.12, out=px)
         np.add(px, 0.055, out=px)
