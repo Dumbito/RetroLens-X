@@ -38,10 +38,10 @@ class PortalRenderer:
             return frame
 
         frame_h, frame_w = frame.shape[:2]
-        cx, cy = center
-        angle_rad = math.radians(angle)
-        rx = max(width * 0.5, 1.0)
-        ry = max(height * 0.5, 1.0)
+        cx, cy = map(int, center)
+        angle_rad = math.radians(float(angle))
+        rx = max(float(width) * 0.5, 1.0)
+        ry = max(float(height) * 0.5, 1.0)
         ca = abs(math.cos(angle_rad))
         sa = abs(math.sin(angle_rad))
         margin = max(
@@ -82,7 +82,7 @@ class PortalRenderer:
             local_h,
         )
 
-        alpha = mask.astype(np.float32) * (1.0 / 255.0)
+        alpha = mask.astype(np.float32) / 255.0
         alpha_3 = alpha[..., None]
         local_output = (
             local_frame.astype(np.float32) * (1.0 - alpha_3)
@@ -96,11 +96,11 @@ class PortalRenderer:
         energy = np.zeros_like(local_output)
         self._draw_rings(energy, local_center, width, height, angle_rad, t)
         self._draw_particles(energy, local_center, width, height, angle_rad, t)
-        cv2.addWeighted(local_output, 1.0, energy, 0.82, 0.0, dst=local_output)
+        local_output = cv2.addWeighted(local_output, 1.0, energy, 0.82, 0.0)
 
         rim = np.zeros_like(local_output)
         self._draw_rim(rim, local_center, width, height, angle_rad, t)
-        cv2.addWeighted(local_output, 1.0, rim, 0.95, 0.0, dst=local_output)
+        local_output = cv2.addWeighted(local_output, 1.0, rim, 0.95, 0.0)
 
         frame[y0:y1, x0:x1] = local_output
         return frame
@@ -113,16 +113,14 @@ class PortalRenderer:
 
     @staticmethod
     def _prepare_content(dimension, width, height, angle, local_w, local_h):
-        target_w = max(1, int(width))
-        target_h = max(1, int(height))
+        target_w = max(1, int(round(width)))
+        target_h = max(1, int(round(height)))
         if dimension.shape[1] == target_w and dimension.shape[0] == target_h:
             resized = dimension
         else:
             resized = cv2.resize(dimension, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
 
-        # Rotate into a canvas large enough to contain the complete dimension.
-        # Rotating a non-square image into its original WxH canvas would crop it
-        # at 90 degrees and can leave the portal mask with no usable content.
+        # Build a bounding canvas large enough to contain the rotated dimension.
         sin_a = abs(math.sin(angle))
         cos_a = abs(math.cos(angle))
         rotated_w = max(1, int(math.ceil(target_w * cos_a + target_h * sin_a)))
@@ -149,8 +147,8 @@ class PortalRenderer:
             )
 
         canvas = np.zeros((local_h, local_w, 3), dtype=np.uint8)
-        x = (local_w - rotated.shape[1]) // 2
-        y = (local_h - rotated.shape[0]) // 2
+        x = int(round(local_w * 0.5 - rotated.shape[1] * 0.5))
+        y = int(round(local_h * 0.5 - rotated.shape[0] * 0.5))
         src_x0 = max(0, -x)
         src_y0 = max(0, -y)
         dst_x0 = max(0, x)
@@ -184,7 +182,12 @@ class PortalRenderer:
         rx = max(width * 0.5, 1.0)
         ry = max(height * 0.5, 1.0)
         theta = np.arctan2(yr, xr)
-        wave = 1.0 + 0.075 * np.sin(theta * 5.0 + t * 3.2) + 0.045 * np.sin(theta * 9.0 - t * 2.1) + 0.025 * np.sin(theta * 14.0 + t * 4.7)
+        wave = (
+            1.0
+            + 0.075 * np.sin(theta * 5.0 + t * 3.2)
+            + 0.045 * np.sin(theta * 9.0 - t * 2.1)
+            + 0.025 * np.sin(theta * 14.0 + t * 4.7)
+        )
         radius = np.sqrt((xr / rx) ** 2 + (yr / ry) ** 2)
         boundary = radius / wave
         alpha = np.clip((1.0 - boundary) / 0.035 + 0.5, 0.0, 1.0)
@@ -212,8 +215,9 @@ class PortalRenderer:
             cv2.polylines(layer, [pts], True, (90, 170, 245), 2 if i == 1 else 1, cv2.LINE_AA)
             if self.config.ring_blur_sigma > 0:
                 blur = cv2.GaussianBlur(layer, (0, 0), self.config.ring_blur_sigma)
-                cv2.addWeighted(image, 1.0, blur, 0.45, 0.0, dst=image)
-            cv2.addWeighted(image, 1.0, layer, 0.75, 0.0, dst=image)
+                image = cv2.addWeighted(image, 1.0, blur, 0.45, 0.0)
+            image = cv2.addWeighted(image, 1.0, layer, 0.75, 0.0)
+        return image
 
     def _draw_rim(self, image, center, width, height, angle, t):
         pts = self._ellipse_points(center, width, height, angle, t, 0.0, 1.0, 220)
