@@ -11,15 +11,17 @@ import numpy as np
 class PortalVisualConfig:
     edge_thickness: int = 4
     glow_sigma: float = 14.0
-    roi_margin: int = 34
+    roi_margin: int = 40
     feather: int = 4
     chromatic_offset: int = 4
     glitch_strength: float = 0.8
     glow_scale: float = 0.5
+    depth_rings: int = 4
+    energy_particles: int = 14
 
 
 class PortalRenderer:
-    """Composite the transformed dimension as a rotatable spatial window."""
+    """Composite a rotatable multiverse window with dimensional energy detail."""
 
     def __init__(self, config: PortalVisualConfig | None = None) -> None:
         self.config = config or PortalVisualConfig()
@@ -135,24 +137,70 @@ class PortalRenderer:
         return mask
 
     @staticmethod
-    def _draw_border(image, corners, timestamp_ms, intensity):
+    def _lerp_corners(corners, amount):
+        center = corners.mean(axis=0)
+        return center + (corners - center) * float(amount)
+
+    @staticmethod
+    def _draw_segment(image, p0, p1, fraction, length_fraction, value=255):
+        start = p0 + (p1 - p0) * fraction
+        end = start + (p1 - p0) * length_fraction
+        cv2.line(image, tuple(np.round(start).astype(int)), tuple(np.round(end).astype(int)), value, 1, cv2.LINE_AA)
+
+    def _draw_border(self, image, corners, timestamp_ms, intensity):
         pts = np.round(corners).astype(np.int32)
-        thickness = max(1, int(round(4 * (0.7 + 0.3 * intensity))))
+        thickness = max(1, int(round(self.config.edge_thickness * (0.7 + 0.3 * intensity))))
         cv2.polylines(image, [pts], True, 255, thickness, cv2.LINE_AA)
-        offset = max(1, int(round(4 * intensity)))
+
+        offset = max(1, int(round(self.config.chromatic_offset * intensity)))
         shift = np.array([offset, 0], dtype=np.int32)
         cv2.polylines(image, [pts - shift], True, 135, 1, cv2.LINE_AA)
         cv2.polylines(image, [pts + shift], True, 190, 1, cv2.LINE_AA)
 
         phase = timestamp_ms * 0.01
-        for i in range(6):
-            a = i % 4
-            fraction = (math.sin(phase * (0.8 + i * 0.13) + i * 2.4) + 1.0) * 0.5
-            p0 = pts[a]
-            p1 = pts[(a + 1) % 4]
-            start = p0 + (p1 - p0) * fraction
-            end = start + (p1 - p0) * (0.04 + 0.08 * fraction)
-            cv2.line(image, tuple(np.round(start).astype(int)), tuple(np.round(end).astype(int)), 255, 1, cv2.LINE_AA)
+        # Perspective-like inner depth frames.
+        for ring in range(1, self.config.depth_rings + 1):
+            amount = 1.0 - ring * 0.115
+            inner = self._lerp_corners(corners, amount)
+            inner_pts = np.round(inner).astype(np.int32)
+            pulse = (math.sin(phase * (0.45 + ring * 0.08) + ring * 1.7) + 1.0) * 0.5
+            value = int(42 + 70 * pulse * intensity)
+            cv2.polylines(image, [inner_pts], True, value, 1, cv2.LINE_AA)
+
+        # Moving energy fragments along the four edges.
+        for i in range(8):
+            edge = i % 4
+            fraction = (math.sin(phase * (0.75 + i * 0.11) + i * 2.1) + 1.0) * 0.5
+            length = 0.025 + 0.075 * ((math.sin(phase * 0.6 + i) + 1.0) * 0.5)
+            p0 = corners[edge]
+            p1 = corners[(edge + 1) % 4]
+            self._draw_segment(image, p0, p1, fraction, length, 255)
+
+        # Corner brackets make the portal read as a dimensional aperture.
+        for i in range(4):
+            p = corners[i]
+            prev_p = corners[(i - 1) % 4]
+            next_p = corners[(i + 1) % 4]
+            a = p + (prev_p - p) * 0.12
+            b = p + (next_p - p) * 0.12
+            cv2.line(image, tuple(np.round(a).astype(int)), tuple(np.round(p).astype(int)), 210, 2, cv2.LINE_AA)
+            cv2.line(image, tuple(np.round(p).astype(int)), tuple(np.round(b).astype(int)), 255, 2, cv2.LINE_AA)
+
+        # Sparse deterministic particles orbiting the aperture.
+        for i in range(self.config.energy_particles):
+            theta = phase * (0.08 + i * 0.006) + i * 1.913
+            side = i % 4
+            fraction = (math.sin(theta) + 1.0) * 0.5
+            p0 = corners[side]
+            p1 = corners[(side + 1) % 4]
+            point = p0 + (p1 - p0) * fraction
+            tangent = p1 - p0
+            norm = np.array([-tangent[1], tangent[0]], dtype=np.float32)
+            norm /= max(float(np.linalg.norm(norm)), 1e-5)
+            distance = 5.0 + 12.0 * ((math.sin(theta * 1.7) + 1.0) * 0.5)
+            point = point + norm * distance
+            radius = 1 if i % 3 else 2
+            cv2.circle(image, tuple(np.round(point).astype(int)), radius, int(90 + 150 * intensity), -1, cv2.LINE_AA)
 
     def _glow_from_border(self, border):
         scale = min(max(float(self.config.glow_scale), 0.35), 1.0)
