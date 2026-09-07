@@ -34,6 +34,9 @@ class PortalRenderer:
         self.particle_size = rng.uniform(1.0, 3.0, count)
         self._theta_cache: dict[int, np.ndarray] = {}
         self._grid_cache: dict[tuple[int, int], tuple[np.ndarray, np.ndarray]] = {}
+        self._glow_shape: tuple[int, int] | None = None
+        self._glow_small_shape: tuple[int, int] | None = None
+        self._glow_small_buffer: np.ndarray | None = None
 
     def render(self, frame, dimension, center, width, height, angle, timestamp_ms):
         if width <= 0 or height <= 0 or frame.ndim != 3:
@@ -115,9 +118,15 @@ class PortalRenderer:
         h, w = edges.shape[:2]
         small_w = max(1, int(round(w * scale)))
         small_h = max(1, int(round(h * scale)))
-        small = cv2.resize(edges, (small_w, small_h), interpolation=cv2.INTER_AREA)
+        small_shape = (small_h, small_w)
+        if self._glow_shape != (h, w) or self._glow_small_shape != small_shape:
+            self._glow_shape = (h, w)
+            self._glow_small_shape = small_shape
+            self._glow_small_buffer = np.empty(small_shape, dtype=np.uint8)
+
+        small = cv2.resize(edges, (small_w, small_h), interpolation=cv2.INTER_AREA, dst=self._glow_small_buffer)
         small_sigma = max(0.5, self.config.glow_sigma * scale)
-        small_glow = cv2.GaussianBlur(small, (0, 0), small_sigma)
+        small_glow = cv2.GaussianBlur(small, (0, 0), small_sigma, dst=self._glow_small_buffer)
         return cv2.resize(small_glow, (w, h), interpolation=cv2.INTER_LINEAR)
 
     @staticmethod
@@ -247,28 +256,17 @@ class PortalRenderer:
         return np.column_stack((x * ca - y * sa + cx, x * sa + y * ca + cy)).astype(np.int32)
 
     def _draw_rings(self, image, center, width, height, angle, t):
-        if self.config.ring_count <= 0:
-            return
-
-        sharp = np.zeros_like(image)
+        layers = []
+        base = np.zeros_like(image)
         for i in range(self.config.ring_count):
             pulse = 1.0 + 0.035 * math.sin(t * (2.0 + i * 0.55) + i)
             scale = (1.0 + (i - 1) * 0.045) * pulse
             pts = self._ellipse_points(center, width, height, angle, t, i * 1.9, scale, 160)
-            cv2.polylines(
-                sharp,
-                [pts],
-                True,
-                (90, 170, 245),
-                2 if i == 1 else 1,
-                cv2.LINE_AA,
-            )
-
+            cv2.polylines(base, [pts], True, (90, 170, 245), 2 if i == 1 else 1, cv2.LINE_AA)
         if self.config.ring_blur_sigma > 0:
-            blur = cv2.GaussianBlur(sharp, (0, 0), self.config.ring_blur_sigma)
+            blur = cv2.GaussianBlur(base, (0, 0), self.config.ring_blur_sigma)
             image[:] = cv2.addWeighted(image, 1.0, blur, 0.45, 0.0)
-
-        image[:] = cv2.addWeighted(image, 1.0, sharp, 0.75, 0.0)
+        image[:] = cv2.addWeighted(image, 1.0, base, 0.75, 0.0)
 
     def _draw_rim(self, image, center, width, height, angle, t):
         pts = self._ellipse_points(center, width, height, angle, t, 0.0, 1.0, 220)
