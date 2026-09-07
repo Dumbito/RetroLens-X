@@ -43,9 +43,9 @@ def main():
     portal_intensity = 0.0
     has_portal_geometry = False
     open_confirm_frames = 0
-    lost_frames = 0
+    lost_since = None
     OPEN_CONFIRM_FRAMES = 3
-    LOST_GRACE_FRAMES = 7
+    LOST_GRACE_SECONDS = 0.60
     last_time = time.monotonic()
 
     try:
@@ -65,21 +65,22 @@ def main():
 
             target_active = gestures.two_hand_open
 
-            if target_active:
+            if target_active and len(hands) >= 2:
                 open_confirm_frames = min(open_confirm_frames + 1, OPEN_CONFIRM_FRAMES)
-                lost_frames = 0
+                lost_since = None
                 if open_confirm_frames >= OPEN_CONFIRM_FRAMES:
                     state = portal.update(hands, timestamp_ms)
                     has_portal_geometry = state.active
             else:
                 open_confirm_frames = 0
                 if has_portal_geometry:
-                    lost_frames += 1
-                    if lost_frames > LOST_GRACE_FRAMES:
+                    if lost_since is None:
+                        lost_since = now
+                    elif now - lost_since >= LOST_GRACE_SECONDS:
                         has_portal_geometry = False
                         portal.state.active = False
                 else:
-                    lost_frames = 0
+                    lost_since = None
 
             target_intensity = 1.0 if has_portal_geometry else 0.0
             smoothing = 1.0 - math.exp(-delta_time * 10.0)
