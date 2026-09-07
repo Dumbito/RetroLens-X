@@ -35,11 +35,20 @@ class PortalRenderer:
         self._theta_cache: dict[int, np.ndarray] = {}
         self._grid_cache: dict[tuple[int, int], tuple[np.ndarray, np.ndarray]] = {}
         self._canvas_cache: dict[tuple[int, int], np.ndarray] = {}
-        self._energy_cache: dict[tuple[int, int], np.ndarray] = {}
-        self._rim_cache: dict[tuple[int, int], np.ndarray] = {}
         self._ring_cache: dict[tuple[int, int], np.ndarray] = {}
+        self._rim_cache: dict[tuple[int, int], np.ndarray] = {}
+        self._glow_cache: dict[tuple[int, int], np.ndarray] = {}
+        self._alpha_cache: dict[tuple[int, int], np.ndarray] = {}
 
     def _buffer(self, cache: dict[tuple[int, int], np.ndarray], shape: tuple[int, int, int]) -> np.ndarray:
+        key = (shape[1], shape[0])
+        buffer = cache.get(key)
+        if buffer is None or buffer.shape != shape:
+            buffer = np.empty(shape, dtype=np.uint8)
+            cache[key] = buffer
+        return buffer
+
+    def _single_buffer(self, cache: dict[tuple[int, int], np.ndarray], shape: tuple[int, int]) -> np.ndarray:
         key = (shape[1], shape[0])
         buffer = cache.get(key)
         if buffer is None or buffer.shape != shape:
@@ -83,17 +92,18 @@ class PortalRenderer:
             dimension, width, height, angle_rad, local_center, local_w, local_h
         )
 
-        alpha = mask.astype(np.float32) / 255.0
-        local_output = (
-            local_frame.astype(np.float32) * (1.0 - alpha[..., None])
-            + content.astype(np.float32) * alpha[..., None]
-        ).astype(np.uint8)
+        alpha = self._single_buffer(self._alpha_cache, mask.shape)
+        cv2.normalize(mask, alpha, 1.0 / 255.0, 0.0, cv2.NORM_MINMAX, dtype=cv2.CV_32F)
+        local_output = self._buffer(self._canvas_cache, local_frame.shape)
+        np.multiply(local_frame, 1.0 - alpha[..., None], out=local_output, casting="unsafe")
+        np.add(local_output, content * alpha[..., None], out=local_output, casting="unsafe")
+        local_output = np.clip(local_output, 0, 255).astype(np.uint8)
 
         edges = cv2.Canny(mask, 70, 180)
         glow = self._glow_from_edges(edges)
         self._add_glow(local_output, glow)
 
-        energy = self._buffer(self._energy_cache, local_output.shape)
+        energy = self._buffer(self._ring_cache, local_output.shape)
         energy.fill(0)
         self._draw_rings(energy, local_center, width, height, angle_rad, t)
         self._draw_particles(energy, local_center, width, height, angle_rad, t)
@@ -111,7 +121,9 @@ class PortalRenderer:
         sigma = max(float(self.config.glow_sigma), 0.5)
         radius = max(1, int(round(sigma * 1.5)))
         kernel = radius * 2 + 1
-        return cv2.blur(edges, (kernel, kernel))
+        glow = self._single_buffer(self._glow_cache, edges.shape)
+        cv2.blur(edges, (kernel, kernel), dst=glow)
+        return glow
 
     @staticmethod
     def _add_glow(image, glow):
@@ -120,7 +132,8 @@ class PortalRenderer:
                 image[:, :, channel], 1.0, glow, weight, 0.0
             )
 
-    def _prepare_content(self, dimension, width, height, angle, center, local_w, local_h):
+    @staticmethod
+    def _prepare_content(dimension, width, height, angle, center, local_w, local_h):
         target_w = max(1, int(round(float(width))))
         target_h = max(1, int(round(float(height))))
         if dimension.shape[1] != target_w or dimension.shape[0] != target_h:
@@ -148,8 +161,7 @@ class PortalRenderer:
                 borderMode=cv2.BORDER_REFLECT_101,
             )
 
-        canvas = self._buffer(self._canvas_cache, (local_h, local_w, 3))
-        canvas.fill(0)
+        canvas = np.zeros((local_h, local_w, 3), dtype=np.uint8)
         cx, cy = center
         x0 = int(round(cx - target_w * 0.5))
         y0 = int(round(cy - target_h * 0.5))
@@ -231,8 +243,7 @@ class PortalRenderer:
         return np.column_stack((x * ca - y * sa + cx, x * sa + y * ca + cy)).astype(np.int32)
 
     def _draw_rings(self, image, center, width, height, angle, t):
-        base = self._buffer(self._ring_cache, image.shape)
-        base.fill(0)
+        base = image
         for i in range(self.config.ring_count):
             pulse = 1.0 + 0.035 * math.sin(t * (2.0 + i * 0.55) + i)
             scale = (1.0 + (i - 1) * 0.045) * pulse
@@ -241,7 +252,6 @@ class PortalRenderer:
         if self.config.ring_blur_sigma > 0:
             blur = cv2.GaussianBlur(base, (0, 0), self.config.ring_blur_sigma)
             image[:] = cv2.addWeighted(image, 1.0, blur, 0.45, 0.0)
-        image[:] = cv2.addWeighted(image, 1.0, base, 0.75, 0.0)
 
     def _draw_rim(self, image, center, width, height, angle, t):
         pts = self._ellipse_points(center, width, height, angle, t, 0.0, 1.0, 220)
