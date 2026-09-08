@@ -7,8 +7,6 @@ import numpy as np
 from src.app.state_machine import PortalStateMachine
 from src.camera.camera import Camera, CameraConfig
 from src.diagnostics.profiler import PipelineProfiler
-from src.dimensions import MultiverseDimension, ProceduralDimension
-from src.dimensions.universe import DimensionalUniverse
 from src.gestures.gesture_engine import GestureEngine
 from src.media import VideoLayer
 from src.pipeline import CallableEffect, EffectPipeline, FrameContext
@@ -17,8 +15,6 @@ from src.portal.portal_physics import PortalPhysics
 from src.portal.portal_renderer import PortalRenderer
 from src.portal.spatial_fold import SpatialFoldEngine
 from src.vfx.background_fx import BackgroundFX
-from src.vfx.portal_scene import Portal3DScene
-from src.vision.hand_tracker import HandTracker
 
 CONNECTIONS = [(0,1),(1,2),(2,3),(3,4),(0,5),(5,6),(6,7),(7,8),(5,9),(9,10),(10,11),(11,12),(9,13),(13,14),(14,15),(15,16),(13,17),(17,18),(18,19),(19,20),(0,17)]
 
@@ -55,63 +51,94 @@ def hand_points(hands):
     return tuple(hand.pixel_landmarks[8] for hand in hands[:2] if len(hand.pixel_landmarks) > 8)
 
 
-def blend_dimensions(base, overlay, weight):
-    weight = max(0.0, min(1.0, float(weight)))
-    if base.shape != overlay.shape:
-        overlay = cv2.resize(overlay, (base.shape[1], base.shape[0]), interpolation=cv2.INTER_LINEAR)
-    return np.clip(base.astype(np.float32) * (1.0 - weight) + overlay.astype(np.float32) * weight, 0, 255).astype(np.uint8)
-
-
-def build_portal_pipeline(background, fold, renderer, camera_dimension, comic_dimension, universe, portal_scene, video_layer):
+def build_portal_pipeline(background, fold, renderer, video_layer):
     def environment(ctx):
         if ctx.phase != "OPEN" or ctx.intensity <= 0.005:
             return ctx
         state, physics = ctx.portal_state, ctx.physics_state
-        ctx.frame = background.apply(ctx.frame, state.center, state.width, state.height, state.angle, ctx.intensity, motion=ctx.motion, waves=physics and ctx.metadata.get("waves", ()), hands=ctx.hand_points, flash=ctx.metadata.get("flash", 0.0), timestamp_ms=ctx.timestamp_ms)
+        ctx.frame = background.apply(
+            ctx.frame,
+            state.center,
+            state.width,
+            state.height,
+            state.angle,
+            ctx.intensity,
+            motion=ctx.motion,
+            waves=physics and ctx.metadata.get("waves", ()),
+            hands=ctx.hand_points,
+            flash=ctx.metadata.get("flash", 0.0),
+            timestamp_ms=ctx.timestamp_ms,
+        )
         return ctx
 
     def fold_stage(ctx):
         if ctx.phase != "OPEN" or ctx.intensity <= 0.005:
             return ctx
         state = ctx.portal_state
-        ctx.frame = fold.apply(ctx.frame, state.center, state.width, state.height, angle=state.angle, intensity=ctx.intensity, motion=ctx.motion, timestamp_ms=ctx.timestamp_ms)
+        ctx.frame = fold.apply(
+            ctx.frame,
+            state.center,
+            state.width,
+            state.height,
+            angle=state.angle,
+            intensity=ctx.intensity,
+            motion=ctx.motion,
+            timestamp_ms=ctx.timestamp_ms,
+        )
         return ctx
 
     def dimensions(ctx):
         if ctx.phase != "OPEN" or ctx.intensity <= 0.005:
             return ctx
-        state, physics = ctx.portal_state, ctx.physics_state
-        camera_layer = camera_dimension.render(ctx.frame, state.width, state.height, state.center, ctx.timestamp_ms, view_x=ctx.view_x, view_y=ctx.view_y, view_angle=state.angle)
-        comic = comic_dimension.render(state.width, state.height, ctx.timestamp_ms, view_x=ctx.view_x, view_y=ctx.view_y, view_angle=state.angle)
-        cosmos = universe.render(state.width, state.height, ctx.timestamp_ms, view_x=ctx.view_x, view_y=ctx.view_y, intensity=ctx.intensity, turbulence=physics.turbulence)
-        scene = portal_scene.render(state.width, state.height, ctx.timestamp_ms, view_x=ctx.view_x, view_y=ctx.view_y, intensity=ctx.intensity)
-        video = video_layer.render(state.width, state.height, ctx.timestamp_ms, view_x=ctx.view_x, view_y=ctx.view_y)
-        layered = blend_dimensions(camera_layer, comic, 0.16 + 0.06 * physics.turbulence)
-        layered = blend_dimensions(layered, cosmos, min(0.78, 0.62 + 0.08 * physics.stability + 0.04 * physics.pulse))
-        layered = blend_dimensions(layered, scene, portal_scene.config.opacity)
-        if video is not None:
-            video_weight = min(0.78, video_layer.opacity * (0.78 + 0.22 * ctx.intensity))
-            video_weight *= 0.92 - 0.12 * physics.pressure
-            layered = blend_dimensions(layered, video, video_weight)
-        gain = 0.82 + 0.18 * (1.0 - physics.pressure) + 0.08 * physics.pulse
-        ctx.metadata["layered"] = np.clip(layered.astype(np.float32) * gain, 0, 255).astype(np.uint8)
+        state = ctx.portal_state
+        video = video_layer.render(
+            state.width,
+            state.height,
+            ctx.timestamp_ms,
+            view_x=ctx.view_x,
+            view_y=ctx.view_y,
+        )
+        if video is None:
+            return ctx
+
+        # The portal is now a holographic rectangular filter: the uploaded
+        # video is the actual interior content, with no procedural universe.
+        tint = np.zeros_like(video)
+        tint[:] = (155, 55, 205)  # BGR magenta/purple hologram tint
+        filtered = cv2.addWeighted(video, 0.90, tint, 0.10, 0.0)
+        ctx.metadata["layered"] = filtered
         return ctx
 
     def final_composite(ctx):
         if ctx.phase != "OPEN" or ctx.intensity <= 0.005:
             return ctx
-        state, physics = ctx.portal_state, ctx.physics_state
-        layered = ctx.metadata["layered"]
-        if physics and getattr(physics, "collapse", 0.0) > 0.01:
-            layered = cv2.GaussianBlur(layered, (0, 0), 1.0 + 4.0 * physics.collapse)
-        ctx.frame = renderer.render(ctx.frame, layered, state.center, state.width, state.height, state.angle, ctx.timestamp_ms, ctx.intensity, motion=ctx.motion)
+        state = ctx.portal_state
+        layered = ctx.metadata.get("layered")
+        if layered is None:
+            return ctx
+        ctx.frame = renderer.render(
+            ctx.frame,
+            layered,
+            state.center,
+            state.width,
+            state.height,
+            state.angle,
+            ctx.timestamp_ms,
+            ctx.intensity,
+            motion=ctx.motion,
+        )
         return ctx
 
-    return EffectPipeline([CallableEffect("background", environment), CallableEffect("spatial_fold", fold_stage), CallableEffect("dimensions", dimensions), CallableEffect("portal_composite", final_composite)])
+    return EffectPipeline([
+        CallableEffect("background", environment),
+        CallableEffect("spatial_fold", fold_stage),
+        CallableEffect("video_filter", dimensions),
+        CallableEffect("portal_composite", final_composite),
+    ])
 
 
 def draw_hud(frame, phase, distance, scale, profiler, show_profiler):
-    status, hint = (("MULTIVERSE WINDOW", "JUNTA LOS INDICES PARA CERRAR") if phase == "OPEN" else ("FRAME ARMED", "SEPARA LOS INDICES PARA ABRIR") if phase == "ARMED" else ("FRAME READY", "JUNTA LAS PUNTAS DE LOS INDICES"))
+    status, hint = (("HOLOGRAPHIC WINDOW", "JUNTA LOS INDICES PARA CERRAR") if phase == "OPEN" else ("FRAME ARMED", "SEPARA LOS INDICES PARA ABRIR") if phase == "ARMED" else ("FRAME READY", "JUNTA LAS PUNTAS DE LOS INDICES"))
     cv2.putText(frame, status, (20,35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
     cv2.putText(frame, hint, (20,65), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1)
     if distance is not None and scale is not None:
@@ -124,19 +151,15 @@ def draw_hud(frame, phase, distance, scale, profiler, show_profiler):
 
 def main():
     camera = Camera(CameraConfig(threaded=True))
-    tracker = HandTracker("assets/models/hand_landmarker.task")
+    tracker = __import__("src.vision.hand_tracker", fromlist=["HandTracker"]).HandTracker("assets/models/hand_landmarker.task")
     gestures = GestureEngine()
     portal = PortalEngine(min_width=120, max_width=900, aspect_ratio=0.58, smoothing=0.24)
     physics = PortalPhysics()
     background = BackgroundFX(work_scale=0.55, margin=125)
     fold = SpatialFoldEngine(strength=0.34, falloff=1.35, margin=40, work_scale=0.70)
     renderer = PortalRenderer()
-    portal_scene = Portal3DScene()
-    camera_dimension = MultiverseDimension(work_scale=0.60)
-    comic_dimension = ProceduralDimension(work_scale=0.46, max_work_width=360, max_work_height=260)
-    universe = DimensionalUniverse(work_scale=0.42, max_width=420, max_height=300)
     video_layer = VideoLayer("assets/media/portal.mp4", opacity=0.68)
-    portal_pipeline = build_portal_pipeline(background, fold, renderer, camera_dimension, comic_dimension, universe, portal_scene, video_layer)
+    portal_pipeline = build_portal_pipeline(background, fold, renderer, video_layer)
     lifecycle = PortalStateMachine()
     profiler = PipelineProfiler()
     show_hand_rig = False
