@@ -84,7 +84,6 @@ class PortalRenderer:
             return frame
 
         local = frame[y0:y1, x0:x1]
-        local_center = (cx - x0, cy - y0)
         quad = quad_global - np.array([x0, y0], np.float32)
 
         content = dimension
@@ -150,8 +149,7 @@ class PortalRenderer:
             glow_small = self._buffer(self._effect_cache, (glow_h, glow_w, 3))
             cv2.resize(border, (glow_w, glow_h), dst=glow_small, interpolation=cv2.INTER_AREA)
             glow_small = cv2.GaussianBlur(glow_small, (0, 0), max(2.0, self.config.glow_sigma * glow_scale))
-            glow = self._buffer(self._output_cache, border.shape)
-            cv2.resize(glow_small, (border.shape[1], border.shape[0]), dst=glow, interpolation=cv2.INTER_LINEAR)
+            glow = cv2.resize(glow_small, (border.shape[1], border.shape[0]), interpolation=cv2.INTER_LINEAR)
         else:
             glow = cv2.GaussianBlur(border, (0, 0), self.config.glow_sigma)
 
