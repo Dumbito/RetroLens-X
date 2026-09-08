@@ -14,6 +14,7 @@ from src.portal.portal_engine import PortalEngine
 from src.portal.portal_physics import PortalPhysics
 from src.portal.portal_renderer import PortalRenderer
 from src.portal.spatial_fold import SpatialFoldEngine
+from src.vision.hand_tracker import HandTracker
 from src.vfx.background_fx import BackgroundFX
 
 CONNECTIONS = [(0,1),(1,2),(2,3),(3,4),(0,5),(5,6),(6,7),(7,8),(5,9),(9,10),(10,11),(11,12),(9,13),(13,14),(14,15),(15,16),(13,17),(17,18),(18,19),(19,20),(0,17)]
@@ -56,55 +57,27 @@ def build_portal_pipeline(background, fold, renderer, video_layer):
         if ctx.phase != "OPEN" or ctx.intensity <= 0.005:
             return ctx
         state, physics = ctx.portal_state, ctx.physics_state
-        ctx.frame = background.apply(
-            ctx.frame,
-            state.center,
-            state.width,
-            state.height,
-            state.angle,
-            ctx.intensity,
-            motion=ctx.motion,
-            waves=physics and ctx.metadata.get("waves", ()),
-            hands=ctx.hand_points,
-            flash=ctx.metadata.get("flash", 0.0),
-            timestamp_ms=ctx.timestamp_ms,
-        )
+        ctx.frame = background.apply(ctx.frame, state.center, state.width, state.height, state.angle, ctx.intensity, motion=ctx.motion, waves=physics and ctx.metadata.get("waves", ()), hands=ctx.hand_points, flash=ctx.metadata.get("flash", 0.0), timestamp_ms=ctx.timestamp_ms)
         return ctx
 
     def fold_stage(ctx):
         if ctx.phase != "OPEN" or ctx.intensity <= 0.005:
             return ctx
         state = ctx.portal_state
-        ctx.frame = fold.apply(
-            ctx.frame,
-            state.center,
-            state.width,
-            state.height,
-            angle=state.angle,
-            intensity=ctx.intensity,
-            motion=ctx.motion,
-            timestamp_ms=ctx.timestamp_ms,
-        )
+        ctx.frame = fold.apply(ctx.frame, state.center, state.width, state.height, angle=state.angle, intensity=ctx.intensity, motion=ctx.motion, timestamp_ms=ctx.timestamp_ms)
         return ctx
 
     def dimensions(ctx):
         if ctx.phase != "OPEN" or ctx.intensity <= 0.005:
             return ctx
         state = ctx.portal_state
-        video = video_layer.render(
-            state.width,
-            state.height,
-            ctx.timestamp_ms,
-            view_x=ctx.view_x,
-            view_y=ctx.view_y,
-        )
+        video = video_layer.render(state.width, state.height, ctx.timestamp_ms, view_x=ctx.view_x, view_y=ctx.view_y)
         if video is None:
             return ctx
-
-        # The portal is now a holographic rectangular filter: the uploaded
-        # video is the actual interior content, with no procedural universe.
+        # The only content inside the portal is the uploaded video.
+        # No procedural universe, planets, comic layer, or 3D scene is added.
         tint = np.zeros_like(video)
-        tint[:] = (155, 55, 205)  # BGR magenta/purple hologram tint
+        tint[:] = (155, 55, 205)
         filtered = cv2.addWeighted(video, 0.90, tint, 0.10, 0.0)
         ctx.metadata["layered"] = filtered
         return ctx
@@ -116,17 +89,7 @@ def build_portal_pipeline(background, fold, renderer, video_layer):
         layered = ctx.metadata.get("layered")
         if layered is None:
             return ctx
-        ctx.frame = renderer.render(
-            ctx.frame,
-            layered,
-            state.center,
-            state.width,
-            state.height,
-            state.angle,
-            ctx.timestamp_ms,
-            ctx.intensity,
-            motion=ctx.motion,
-        )
+        ctx.frame = renderer.render(ctx.frame, layered, state.center, state.width, state.height, state.angle, ctx.timestamp_ms, ctx.intensity, motion=ctx.motion)
         return ctx
 
     return EffectPipeline([
@@ -151,7 +114,7 @@ def draw_hud(frame, phase, distance, scale, profiler, show_profiler):
 
 def main():
     camera = Camera(CameraConfig(threaded=True))
-    tracker = __import__("src.vision.hand_tracker", fromlist=["HandTracker"]).HandTracker("assets/models/hand_landmarker.task")
+    tracker = HandTracker("assets/models/hand_landmarker.task")
     gestures = GestureEngine()
     portal = PortalEngine(min_width=120, max_width=900, aspect_ratio=0.58, smoothing=0.24)
     physics = PortalPhysics()
