@@ -20,22 +20,23 @@ class PortalVisualConfig:
     filter_opacity: float = 0.16
     glass_noise: float = 0.025
     corner_glow: float = 1.0
+    max_effect_pixels: int = 260_000
+    min_effect_scale: float = 0.50
 
 
 class PortalRenderer:
-    """Rectangular holographic video filter with localized VFX."""
+    """Rectangular holographic video filter with adaptive-resolution VFX."""
 
     def __init__(self, config: PortalVisualConfig | None = None) -> None:
         self.config = config or PortalVisualConfig()
-        self._output_cache: dict[tuple[int, int], np.ndarray] = {}
-        self._border_cache: dict[tuple[int, int], np.ndarray] = {}
+        self._output_cache: dict[tuple[int, int, int], np.ndarray] = {}
+        self._border_cache: dict[tuple[int, int, int], np.ndarray] = {}
+        self._effect_cache: dict[tuple[int, int, int], np.ndarray] = {}
         self._rng = np.random.default_rng(7319)
 
     @staticmethod
     def _buffer(cache, shape):
-        key = (shape[1], shape[0])
-        if len(shape) == 3:
-            key = (shape[1], shape[0], shape[2])
+        key = (shape[1], shape[0], shape[2] if len(shape) == 3 else 1)
         buf = cache.get(key)
         if buf is None or buf.shape != shape:
             buf = np.empty(shape, dtype=np.uint8)
@@ -51,6 +52,12 @@ class PortalRenderer:
         p = np.array([[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]], np.float32)
         rotation = np.array([[c, -s], [s, c]], np.float32)
         return p @ rotation.T + np.array([cx, cy], np.float32)
+
+    def _effect_scale(self, width, height):
+        pixels = max(1, int(width) * int(height))
+        if pixels <= self.config.max_effect_pixels:
+            return 1.0
+        return max(self.config.min_effect_scale, math.sqrt(self.config.max_effect_pixels / pixels))
 
     def render(self, frame, dimension, center, width, height, angle, timestamp_ms, intensity=1.0, motion=0.0):
         if width <= 0 or height <= 0 or frame.ndim != 3:
@@ -106,21 +113,48 @@ class PortalRenderer:
             255,
         ).astype(np.uint8)
 
-        # Glass/hologram filter: keep the actual video dominant.
-        tint = np.empty_like(output)
-        tint[:] = (150, 48, 205)  # BGR magenta/purple
-        tint_alpha = self.config.filter_opacity * (0.72 + 0.28 * intensity)
-        filtered = cv2.addWeighted(output, 1.0 - tint_alpha, tint, tint_alpha, 0.0)
+        # Expensive image-space effects run at a capped resolution for large portals.
+        # The final composite remains full-resolution, so the portal can still fill the screen.
+        scale = self._effect_scale(target_w, target_h)
+        effect_w = max(2, int(round(local.shape[1] * scale)))
+        effect_h = max(2, int(round(local.shape[0] * scale)))
+        if scale < 0.999:
+            effect = self._buffer(self._effect_cache, (effect_h, effect_w, 3))
+            cv2.resize(output, (effect_w, effect_h), dst=effect, interpolation=cv2.INTER_AREA)
+        else:
+            effect = output
 
+        tint = np.empty_like(effect)
+        tint[:] = (150, 48, 205)
+        tint_alpha = self.config.filter_opacity * (0.72 + 0.28 * intensity)
+        filtered = cv2.addWeighted(effect, 1.0 - tint_alpha, tint, tint_alpha, 0.0)
         self._scanlines(filtered, intensity)
         self._glass_noise(filtered, intensity, t)
         self._chromatic_split(filtered, intensity, motion)
+
+        if scale < 0.999:
+            filtered_full = self._buffer(self._output_cache, local.shape)
+            cv2.resize(filtered, (local.shape[1], local.shape[0]), dst=filtered_full, interpolation=cv2.INTER_LINEAR)
+            filtered = filtered_full
         self._clip_to_mask(output, local, filtered, mask, intensity)
 
         border = self._buffer(self._border_cache, (local.shape[0], local.shape[1], 3))
         border.fill(0)
         self._draw_hologram_border(border, quad, t, intensity, motion)
-        glow = cv2.GaussianBlur(border, (0, 0), self.config.glow_sigma)
+
+        # Glow is also rendered at reduced resolution when the portal becomes large.
+        glow_scale = self._effect_scale(target_w, target_h)
+        if glow_scale < 0.999:
+            glow_w = max(2, int(round(border.shape[1] * glow_scale)))
+            glow_h = max(2, int(round(border.shape[0] * glow_scale)))
+            glow_small = self._buffer(self._effect_cache, (glow_h, glow_w, 3))
+            cv2.resize(border, (glow_w, glow_h), dst=glow_small, interpolation=cv2.INTER_AREA)
+            glow_small = cv2.GaussianBlur(glow_small, (0, 0), max(2.0, self.config.glow_sigma * glow_scale))
+            glow = self._buffer(self._output_cache, border.shape)
+            cv2.resize(glow_small, (border.shape[1], border.shape[0]), dst=glow, interpolation=cv2.INTER_LINEAR)
+        else:
+            glow = cv2.GaussianBlur(border, (0, 0), self.config.glow_sigma)
+
         output[:] = np.clip(
             output.astype(np.float32) + glow.astype(np.float32) * self.config.glow_scale * intensity,
             0,
@@ -178,10 +212,7 @@ class PortalRenderer:
     def _draw_hologram_border(image, quad, t, intensity, motion):
         pts = np.round(quad).astype(np.int32)
         cv2.polylines(image, [pts], True, (235, 70, 255), 2 + int(intensity * 2), cv2.LINE_AA)
-        # Secondary thin white-violet trace gives the screen a glass edge.
         cv2.polylines(image, [pts], True, (255, 190, 255), 1, cv2.LINE_AA)
-
-        # Broken moving highlights, aligned to the rectangular frame.
         edges = list(zip(pts, np.roll(pts, -1, axis=0)))
         for i, (a, b) in enumerate(edges):
             phase = (t * (0.55 + i * 0.13) + i * 0.9) % 1.0
